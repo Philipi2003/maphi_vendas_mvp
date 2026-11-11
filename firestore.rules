@@ -1,0 +1,51 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && get(/databases/$(database)/documents/users/$(request.auth.uid))
+          .data.role == 'DONO';
+    }
+
+    match /itemTypes/{itemTypeId} {
+      allow read: if isOwner() || resource.data.isActive == true;
+      allow create, update, delete: if isOwner();
+    }
+
+    match /items/{itemId} {
+      allow read: if isOwner() || resource.data.status == 'DISPONIVEL';
+      allow create: if isOwner()
+        && request.resource.data.status == 'DISPONIVEL';
+      allow update, delete: if isOwner();
+    }
+
+    match /pickupSpots/{pickupSpotId} {
+      allow read: if isOwner() || resource.data.isActive == true;
+      allow create, update, delete: if isOwner();
+    }
+
+    match /users/{userId} {
+      allow read: if signedIn() && request.auth.uid == userId;
+      allow create: if signedIn()
+        && request.auth.uid == userId
+        && request.resource.data.keys().hasOnly(['name', 'phone', 'createdAt'])
+        && request.resource.data.keys().hasAll(['name', 'createdAt']);
+      allow update: if signedIn()
+        && request.auth.uid == userId
+        && request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['name', 'phone']);
+      allow delete: if false;
+    }
+
+    match /reservations/{reservationId} {
+      allow read: if isOwner()
+        || (signedIn() && resource.data.userId == request.auth.uid);
+      allow create, update, delete: if false;
+    }
+  }
+}
