@@ -14,6 +14,7 @@ from features.catalog.catalog_logic import (
     Cake,
     CatalogController,
     ItemTypeImageCleanupError,
+    ItemTypeNameSyncError,
 )
 from features.catalog.catalog_card_view import CatalogCardView
 from firebase_rest import FirebaseRestError
@@ -65,6 +66,7 @@ class CatalogView:
         self.item_type_regular_price: ft.TextField | None = None
         self.item_type_promotional_price: ft.TextField | None = None
         self.item_type_image_label: ft.Text | None = None
+        self.item_type_inventory_error: ft.Text | None = None
         self.item_type_custom_order: ft.Checkbox | None = None
         self.item_type_is_active: ft.Checkbox | None = None
         self.item_type_delete_button: ft.TextButton | None = None
@@ -559,14 +561,6 @@ class CatalogView:
     async def _open_item_type_form(
         self, _=None, *, item_type: Cake | None = None
     ) -> None:
-        can_delete = False
-        if item_type is not None:
-            try:
-                can_delete = await self.on_check_item_type_inventory(item_type.id)
-            except (FirebaseRestError, ValueError) as exc:
-                self.on_message(f"Não foi possível verificar o estoque do sabor: {exc}")
-                return
-
         self.editing_item_type = item_type
         self.item_type_name = ft.TextField(
             label="Nome do sabor",
@@ -627,11 +621,17 @@ class CatalogView:
         )
         self.item_type_delete_button = ft.TextButton(
             "Excluir sabor",
-            visible=bool(item_type and can_delete),
+            visible=False,
             on_click=self._ask_delete_item_type,
         )
+        self.item_type_inventory_error = ft.Text(
+            "",
+            color="#B3261E",
+            size=12,
+            visible=False,
+        )
         self.item_type_dialog = ft.AlertDialog(
-            modal=True,
+            modal=False,
             title=ft.Text("Editar sabor" if item_type else "Novo sabor"),
             content=ft.Container(
                 width=440,
@@ -654,6 +654,7 @@ class CatalogView:
                         ),
                         self.item_type_custom_order,
                         self.item_type_is_active,
+                        self.item_type_inventory_error,
                     ],
                     tight=True,
                     spacing=12,
@@ -668,8 +669,32 @@ class CatalogView:
                 self.item_type_submit_button,
             ],
             actions_alignment=ft.MainAxisAlignment.END,
+            on_dismiss=self._on_item_type_form_dismiss,
         )
         self.page.show_dialog(self.item_type_dialog)
+        dialog = self.item_type_dialog
+        inventory_error = self.item_type_inventory_error
+        delete_button = self.item_type_delete_button
+        if dialog is None or inventory_error is None or delete_button is None:
+            raise RuntimeError("O formulário do sabor não foi inicializado.")
+        if item_type is None:
+            return
+
+        try:
+            can_delete = await self.on_check_item_type_inventory(item_type.id)
+        except (FirebaseRestError, ValueError) as exc:
+            if self.item_type_dialog is dialog:
+                inventory_error.value = (
+                    "Não foi possível verificar se o sabor pode ser excluído: "
+                    f"{exc}"
+                )
+                inventory_error.visible = True
+                self.page.update()
+            return
+
+        if self.item_type_dialog is dialog:
+            delete_button.visible = can_delete
+            self.page.update()
 
     @staticmethod
     def _price_field_value(value: float | None) -> str:
@@ -715,6 +740,10 @@ class CatalogView:
         if self.item_type_dialog is not None:
             self.page.pop_dialog()
             self.item_type_dialog = None
+        self.editing_item_type = None
+
+    def _on_item_type_form_dismiss(self, _=None) -> None:
+        self.item_type_dialog = None
         self.editing_item_type = None
 
     async def _submit_item_type(self, _=None) -> None:
@@ -763,7 +792,7 @@ class CatalogView:
             self._close_item_type_form()
             self.page.update()
             self.on_notice(success_message)
-        except ItemTypeImageCleanupError as exc:
+        except (ItemTypeImageCleanupError, ItemTypeNameSyncError) as exc:
             self.refresh()
             self._close_item_type_form()
             self.page.update()

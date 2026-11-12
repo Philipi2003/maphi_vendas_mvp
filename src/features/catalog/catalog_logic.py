@@ -9,12 +9,17 @@ from firebase_rest import (
     FirebaseFirestoreClient,
     FirebaseRestError,
     FirebaseStorageClient,
+    MAX_FIRESTORE_BATCH_WRITES,
 )
 
-MAX_STOCK_BATCH_UNITS = 500
+MAX_STOCK_BATCH_UNITS = MAX_FIRESTORE_BATCH_WRITES
 
 
 class ItemTypeImageCleanupError(RuntimeError):
+    pass
+
+
+class ItemTypeNameSyncError(RuntimeError):
     pass
 
 
@@ -357,17 +362,76 @@ class CatalogController:
         )
         index = self.cakes.index(existing)
         self.cakes[index] = updated
+        name_sync_error = None
+        try:
+            await self._synchronize_item_type_names(
+                item_type_id, normalized_name, id_token
+            )
+        except FirebaseRestError as exc:
+            name_sync_error = exc
+
+        image_cleanup_error = None
         if image_url != existing.image_url and existing.image_url:
             try:
                 await self.storage_client.delete_image(
                     existing.image_url, id_token
                 )
             except FirebaseRestError as exc:
-                raise ItemTypeImageCleanupError(
-                    "O sabor foi atualizado com a nova foto, mas não foi "
-                    f"possível excluir a foto anterior: {exc}"
-                ) from exc
+                image_cleanup_error = exc
+
+        if name_sync_error is not None:
+            message = (
+                "O sabor foi atualizado, mas não foi possível sincronizar o "
+                f"nome nas unidades existentes: {name_sync_error}"
+            )
+            if image_cleanup_error is not None:
+                message += (
+                    " A foto anterior também não pôde ser excluída: "
+                    f"{image_cleanup_error}"
+                )
+            raise ItemTypeNameSyncError(message) from name_sync_error
+        if image_cleanup_error is not None:
+            raise ItemTypeImageCleanupError(
+                "O sabor foi atualizado com a nova foto, mas não foi "
+                f"possível excluir a foto anterior: {image_cleanup_error}"
+            ) from image_cleanup_error
         return updated
+
+    async def _synchronize_item_type_names(
+        self, item_type_id: str, item_type_name: str, id_token: str
+    ) -> None:
+        rows = await self.firestore_client.list_items_for_item_type(
+            item_type_id, id_token
+        )
+        documents = []
+        for row in rows:
+            document = row.get("document")
+            if not document:
+                continue
+            document_id = document.get("name", "").rsplit("/", 1)[-1]
+            if not document_id:
+                continue
+            current_name = (
+                document.get("fields", {})
+                .get("itemTypeName", {})
+                .get("stringValue")
+            )
+            if current_name != item_type_name:
+                documents.append(
+                    (
+                        document_id,
+                        {"itemTypeName": {"stringValue": item_type_name}},
+                    )
+                )
+
+        for offset in range(0, len(documents), MAX_FIRESTORE_BATCH_WRITES):
+            batch = documents[offset : offset + MAX_FIRESTORE_BATCH_WRITES]
+            await self.firestore_client.update_documents_atomically(
+                "items",
+                batch,
+                ["itemTypeName"],
+                id_token,
+            )
 
     async def can_delete_item_type(self, item_type_id: str, id_token: str) -> bool:
         return not await self.firestore_client.has_items_for_item_type(

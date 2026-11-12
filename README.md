@@ -15,6 +15,11 @@ e alternância para cadastro. O fluxo de e-mail/senha já foi integrado ao Fireb
 Authentication e usa a Web API Key do projeto para autenticar usuários via REST API.
 Credenciais inválidas são informadas diretamente no formulário de login para que
 o usuário possa corrigir os dados sem fechar a tela.
+Após entrar, o refresh token do Firebase é guardado nas preferências persistentes do
+dispositivo pelo Flet. Ao abrir o app novamente, o token é renovado e o perfil é
+carregado; sair da conta remove a sessão salva. A senha nunca é armazenada. Como o
+refresh token permite recuperar a sessão, ele deve ser tratado como uma credencial:
+use o logout em dispositivos compartilhados e limpe os dados do navegador se necessário.
 
 ## Configuração do Firebase Authentication
 
@@ -138,7 +143,8 @@ status `DISPONIVEL` para exibir o estoque de cada sabor. Donos podem registrar
 uma produção pelo FAB, selecionando um ou mais sabores e suas quantidades; cada
 bolo é salvo como um documento individual em `items`, em uma gravação atômica
 de até 500 unidades por inserção. As unidades novas começam com status
-`DISPONIVEL`.
+`DISPONIVEL`. Ao renomear um sabor, o app também atualiza `itemTypeName` nas
+unidades de estoque associadas.
 
 As regras identificam o dono por `users/{uid}.role == "DONO"`. O próprio usuário
 não pode criar ou editar esse campo: a conta de dono inicial deve receber o papel

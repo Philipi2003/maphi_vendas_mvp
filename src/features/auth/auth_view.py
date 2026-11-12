@@ -49,19 +49,24 @@ class AuthView:
         self.page.update()
 
     async def _logout(self, _=None) -> None:
-        logout_error = None
+        logout_errors = []
         try:
             await self.controller.sign_out_provider()
         except FirebaseAuthError as exc:
-            logout_error = str(exc)
+            logout_errors.append(str(exc))
+        try:
+            await self.controller.clear_persisted_session()
+        except FirebaseAuthError as exc:
+            logout_errors.append(str(exc))
         finally:
             self.controller.logout()
             self.on_auth_changed()
             self.refresh_account_button()
 
-        if logout_error:
-            self.on_message(logout_error)
-        self.on_notice("Você saiu da sua conta.")
+        if logout_errors:
+            self.on_message("\n".join(logout_errors))
+        else:
+            self.on_notice("Você saiu da sua conta.")
 
     def open(self) -> None:
         self.controller.show_login()

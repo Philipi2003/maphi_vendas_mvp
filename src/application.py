@@ -1,7 +1,7 @@
 import flet as ft
 
 from app_config import INK, MUTED, configure_page
-from features.auth.auth_logic import AuthController
+from features.auth.auth_logic import AuthController, FirebaseAuthError
 from features.auth.auth_view import AuthView
 from features.catalog.catalog_logic import CatalogController
 from features.catalog.catalog_view import CatalogView
@@ -18,7 +18,10 @@ class MaphiApplication:
     def __init__(self, page: ft.Page):
         self.page = page
         configure_page(page)
-        self.auth_controller = AuthController()
+        self.auth_session_storage = ft.SharedPreferences()
+        self.auth_controller = AuthController(
+            session_storage=self.auth_session_storage
+        )
         self.catalog_controller = CatalogController()
         self.pickup_spot_controller = PickupSpotController()
         self.auth_view = AuthView(
@@ -65,10 +68,26 @@ class MaphiApplication:
             expand=True,
         )
         page.add(self.root)
-        page.run_task(self.load_database_item_types)
-        page.run_task(self.load_database_pickup_spots)
+        page.run_task(self.initialize)
         if page.pyodide:
             page.run_task(self.prepare_google_auth)
+
+    async def initialize(self) -> None:
+        restored_session = False
+        try:
+            restored_session = await self.auth_controller.restore_session()
+        except FirebaseAuthError as exc:
+            self.show_notice(str(exc))
+
+        if restored_session:
+            self.auth_view.refresh_account_button()
+            is_owner = self.auth_controller.is_owner
+            if not is_owner:
+                self.catalog_controller.hide_inactive_item_types()
+            self.catalog_view.set_owner(is_owner)
+
+        await self.load_database_item_types()
+        await self.load_database_pickup_spots()
 
     def show_message(self, message: str) -> None:
         self.page.show_dialog(

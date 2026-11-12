@@ -6,6 +6,8 @@ from urllib.parse import quote, unquote, urlencode, urlsplit
 
 from app_config import FIREBASE_API_KEY, PROJECT_ID, STORAGE_BUCKET
 
+MAX_FIRESTORE_BATCH_WRITES = 500
+
 
 class FirebaseRestError(RuntimeError):
     def __init__(self, message: str, status_code: int | None = None):
@@ -67,6 +69,10 @@ class FirebaseFirestoreClient:
     ) -> dict:
         if not documents:
             raise ValueError("Informe ao menos um documento para criar.")
+        if len(documents) > MAX_FIRESTORE_BATCH_WRITES:
+            raise ValueError(
+                f"Cada lote pode conter no máximo {MAX_FIRESTORE_BATCH_WRITES} gravações."
+            )
         writes = [
             {
                 "update": {
@@ -74,6 +80,36 @@ class FirebaseFirestoreClient:
                     "fields": fields,
                 },
                 "currentDocument": {"exists": False},
+            }
+            for document_id, fields in documents
+        ]
+        return await self._request(
+            f"{self._documents_url()}:commit",
+            id_token=id_token,
+            method="POST",
+            payload={"writes": writes},
+        )
+
+    async def update_documents_atomically(
+        self,
+        collection: str,
+        documents: list[tuple[str, dict]],
+        field_paths: list[str],
+        id_token: str,
+    ) -> dict:
+        if not documents:
+            return {}
+        if len(documents) > MAX_FIRESTORE_BATCH_WRITES:
+            raise ValueError(
+                f"Cada lote pode conter no máximo {MAX_FIRESTORE_BATCH_WRITES} gravações."
+            )
+        writes = [
+            {
+                "update": {
+                    "name": self._document_name(collection, document_id),
+                    "fields": fields,
+                },
+                "updateMask": {"fieldPaths": field_paths},
             }
             for document_id, fields in documents
         ]
@@ -199,6 +235,27 @@ class FirebaseFirestoreClient:
             },
         )
         return any(row.get("document") for row in rows)
+
+    async def list_items_for_item_type(
+        self, item_type_id: str, id_token: str
+    ) -> list:
+        return await self._request(
+            f"{self._documents_url()}:runQuery",
+            id_token=id_token,
+            method="POST",
+            payload={
+                "structuredQuery": {
+                    "from": [{"collectionId": "items"}],
+                    "where": {
+                        "fieldFilter": {
+                            "field": {"fieldPath": "itemTypeId"},
+                            "op": "EQUAL",
+                            "value": {"stringValue": item_type_id},
+                        }
+                    },
+                }
+            },
+        )
 
     async def create_pickup_spot(
         self, pickup_spot_id: str, fields: dict, id_token: str

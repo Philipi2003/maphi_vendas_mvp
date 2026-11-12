@@ -1,4 +1,6 @@
+import asyncio
 import inspect
+import json
 from datetime import date, datetime, time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -7,6 +9,7 @@ from zoneinfo import ZoneInfo
 import flet as ft
 import pytest
 
+from application import MaphiApplication
 from features.auth.auth_logic import AuthController, FirebaseAuthClient, FirebaseAuthError
 from features.auth.auth_view import AuthView
 from features.auth.account_button_view import AccountButtonView
@@ -14,6 +17,7 @@ from features.catalog.catalog_logic import (
     Cake,
     CatalogController,
     ItemTypeImageCleanupError,
+    ItemTypeNameSyncError,
 )
 from features.catalog.catalog_view import CatalogView
 from features.inventory.production_view import ProductionFormView
@@ -31,7 +35,8 @@ from firebase_rest import (
 
 @pytest.mark.asyncio
 async def test_login_success_sets_authenticated_user():
-    controller = AuthController()
+    session_storage = SimpleNamespace(set=AsyncMock(return_value=True))
+    controller = AuthController(session_storage=session_storage)
     controller.auth_client.sign_in = AsyncMock(
         return_value={
             "idToken": "token-123",
@@ -54,6 +59,142 @@ async def test_login_success_sets_authenticated_user():
     assert controller.refresh_token == "refresh-123"
     assert controller.is_authenticated is True
     assert controller.is_owner is False
+    session_storage.set.assert_awaited_once_with(
+        controller.SESSION_STORAGE_KEY,
+        json.dumps(
+            {"refreshToken": "refresh-123", "provider": "password"},
+            separators=(",", ":"),
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_restore_session_refreshes_token_and_loads_user_profile():
+    session_storage = SimpleNamespace(
+        get=AsyncMock(
+            return_value=json.dumps(
+                {"refreshToken": "old-refresh", "provider": "google"}
+            )
+        ),
+        set=AsyncMock(return_value=True),
+        remove=AsyncMock(return_value=True),
+    )
+    controller = AuthController(session_storage=session_storage)
+    controller.auth_client.refresh_session = AsyncMock(
+        return_value={
+            "idToken": "new-id-token",
+            "refreshToken": "rotated-refresh",
+            "localId": "owner-uid",
+        }
+    )
+    controller.auth_client.lookup_account = AsyncMock(
+        return_value={
+            "localId": "owner-uid",
+            "email": "dona@email.com",
+            "displayName": "Dona",
+        }
+    )
+    controller.firestore_client.get_document = AsyncMock(
+        return_value={"fields": {"role": {"stringValue": "DONO"}}}
+    )
+
+    restored = await controller.restore_session()
+
+    assert restored is True
+    assert controller.is_owner is True
+    assert controller.id_token == "new-id-token"
+    assert controller.refresh_token == "rotated-refresh"
+    assert controller.auth_provider == "google"
+    controller.auth_client.refresh_session.assert_awaited_once_with(
+        "old-refresh"
+    )
+    session_storage.set.assert_awaited_once_with(
+        controller.SESSION_STORAGE_KEY,
+        json.dumps(
+            {"refreshToken": "rotated-refresh", "provider": "google"},
+            separators=(",", ":"),
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_restore_session_removes_revoked_refresh_token():
+    session_storage = SimpleNamespace(
+        get=AsyncMock(
+            return_value=json.dumps(
+                {"refreshToken": "revoked-refresh", "provider": "password"}
+            )
+        ),
+        set=AsyncMock(return_value=True),
+        remove=AsyncMock(return_value=True),
+    )
+    controller = AuthController(session_storage=session_storage)
+    controller.auth_client.refresh_session = AsyncMock(
+        side_effect=FirebaseAuthError(
+            "INVALID_REFRESH_TOKEN", code="INVALID_REFRESH_TOKEN"
+        )
+    )
+
+    with pytest.raises(FirebaseAuthError, match="expirou ou foi revogada"):
+        await controller.restore_session()
+
+    session_storage.remove.assert_awaited_once_with(
+        controller.SESSION_STORAGE_KEY
+    )
+
+
+@pytest.mark.asyncio
+async def test_restore_session_discards_malformed_saved_data():
+    session_storage = SimpleNamespace(
+        get=AsyncMock(return_value="[]"),
+        set=AsyncMock(return_value=True),
+        remove=AsyncMock(return_value=True),
+    )
+    controller = AuthController(session_storage=session_storage)
+
+    with pytest.raises(FirebaseAuthError, match="sessão salva está inválida"):
+        await controller.restore_session()
+
+    session_storage.remove.assert_awaited_once_with(
+        controller.SESSION_STORAGE_KEY
+    )
+
+
+@pytest.mark.asyncio
+async def test_application_restores_session_before_loading_catalog():
+    events = []
+    app = object.__new__(MaphiApplication)
+    app.auth_controller = SimpleNamespace(
+        restore_session=AsyncMock(
+            side_effect=lambda: events.append("restore") or True
+        ),
+        is_owner=True,
+    )
+    app.auth_view = SimpleNamespace(
+        refresh_account_button=Mock(
+            side_effect=lambda: events.append("account")
+        )
+    )
+    app.catalog_controller = SimpleNamespace(hide_inactive_item_types=Mock())
+    app.catalog_view = SimpleNamespace(
+        set_owner=Mock(side_effect=lambda _: events.append("owner"))
+    )
+    app.load_database_item_types = AsyncMock(
+        side_effect=lambda: events.append("items")
+    )
+    app.load_database_pickup_spots = AsyncMock(
+        side_effect=lambda: events.append("pickups")
+    )
+    app.show_notice = Mock()
+
+    await app.initialize()
+
+    app.auth_controller.restore_session.assert_awaited_once()
+    app.auth_view.refresh_account_button.assert_called_once()
+    app.catalog_view.set_owner.assert_called_once_with(True)
+    app.load_database_item_types.assert_awaited_once()
+    app.load_database_pickup_spots.assert_awaited_once()
+    assert events == ["restore", "account", "owner", "items", "pickups"]
 
 
 @pytest.mark.asyncio
@@ -193,6 +334,29 @@ async def test_item_type_update_persists_activation_and_clears_old_promotion():
     )
     controller = CatalogController(cakes=[existing])
     controller.firestore_client.update_document = AsyncMock(return_value={})
+    controller.firestore_client.list_items_for_item_type = AsyncMock(
+        return_value=[
+            {
+                "document": {
+                    "name": "projects/maphi/databases/(default)/documents/items/unit-1",
+                    "fields": {
+                        "itemTypeName": {"stringValue": "Chocolate"},
+                    },
+                }
+            },
+            {
+                "document": {
+                    "name": "projects/maphi/databases/(default)/documents/items/unit-2",
+                    "fields": {
+                        "itemTypeName": {"stringValue": "Chocolate"},
+                    },
+                }
+            },
+        ]
+    )
+    controller.firestore_client.update_documents_atomically = AsyncMock(
+        return_value={}
+    )
     controller.storage_client.delete_image = AsyncMock(return_value=True)
 
     updated = await controller.update_item_type(
@@ -217,7 +381,104 @@ async def test_item_type_update_persists_activation_and_clears_old_promotion():
     assert saved_fields["regularPrice"] == {"doubleValue": 50.0}
     assert "promotionalPrice" not in saved_fields
     assert "promotionalPrice" in update_mask
+    controller.firestore_client.update_documents_atomically.assert_awaited_once_with(
+        "items",
+        [
+            (
+                "unit-1",
+                {"itemTypeName": {"stringValue": "Chocolate amargo"}},
+            ),
+            (
+                "unit-2",
+                {"itemTypeName": {"stringValue": "Chocolate amargo"}},
+            ),
+        ],
+        ["itemTypeName"],
+        "owner-token",
+    )
     controller.storage_client.delete_image.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_item_type_update_reports_inventory_name_sync_failure():
+    existing = Cake(
+        "chocolate", "Chocolate", "Bolo", 1, "#F0E2D6"
+    )
+    controller = CatalogController(cakes=[existing])
+    controller.firestore_client.update_document = AsyncMock(return_value={})
+    controller.firestore_client.list_items_for_item_type = AsyncMock(
+        return_value=[
+            {
+                "document": {
+                    "name": "projects/maphi/databases/(default)/documents/items/unit-1",
+                    "fields": {
+                        "itemTypeName": {"stringValue": "Chocolate"},
+                    },
+                }
+            }
+        ]
+    )
+    controller.firestore_client.update_documents_atomically = AsyncMock(
+        side_effect=FirebaseRestError("Firestore indisponível", 503)
+    )
+
+    with pytest.raises(ItemTypeNameSyncError, match="O sabor foi atualizado"):
+        await controller.update_item_type(
+            item_type_id="chocolate",
+            name="Chocolate amargo",
+            description="Bolo",
+            regular_price="45",
+            promotional_price="",
+            is_custom_order_only=False,
+            is_active=True,
+            id_token="owner-token",
+            user_id="owner-uid",
+        )
+
+    assert controller.cakes[0].name == "Chocolate amargo"
+
+
+@pytest.mark.asyncio
+async def test_item_type_name_sync_splits_large_inventory_into_batches():
+    existing = Cake("chocolate", "Chocolate", "Bolo", 501, "#F0E2D6")
+    controller = CatalogController(cakes=[existing])
+    controller.firestore_client.update_document = AsyncMock(return_value={})
+    controller.firestore_client.list_items_for_item_type = AsyncMock(
+        return_value=[
+            {
+                "document": {
+                    "name": (
+                        "projects/maphi/databases/(default)/documents/"
+                        f"items/unit-{index}"
+                    ),
+                    "fields": {
+                        "itemTypeName": {"stringValue": "Chocolate"},
+                    },
+                }
+            }
+            for index in range(501)
+        ]
+    )
+    controller.firestore_client.update_documents_atomically = AsyncMock(
+        return_value={}
+    )
+
+    await controller.update_item_type(
+        item_type_id="chocolate",
+        name="Chocolate amargo",
+        description="Bolo",
+        regular_price="45",
+        promotional_price="",
+        is_custom_order_only=False,
+        is_active=True,
+        id_token="owner-token",
+        user_id="owner-uid",
+    )
+
+    batches = (
+        controller.firestore_client.update_documents_atomically.await_args_list
+    )
+    assert [len(call.args[1]) for call in batches] == [500, 1]
 
 
 @pytest.mark.asyncio
@@ -246,6 +507,12 @@ async def test_item_type_update_deletes_old_image_after_new_image_is_saved():
     )
     controller.firestore_client.update_document = AsyncMock(
         side_effect=lambda *args: events.append("save")
+    )
+    controller.firestore_client.list_items_for_item_type = AsyncMock(
+        return_value=[]
+    )
+    controller.firestore_client.update_documents_atomically = AsyncMock(
+        return_value={}
     )
     controller.storage_client.delete_image = AsyncMock(
         side_effect=lambda *args: events.append("delete") or True
@@ -297,6 +564,12 @@ async def test_item_type_update_reports_old_image_cleanup_failure_after_save():
         return_value=new_image_url
     )
     controller.firestore_client.update_document = AsyncMock(return_value={})
+    controller.firestore_client.list_items_for_item_type = AsyncMock(
+        return_value=[]
+    )
+    controller.firestore_client.update_documents_atomically = AsyncMock(
+        return_value={}
+    )
     controller.storage_client.delete_image = AsyncMock(
         side_effect=FirebaseRestError("Storage indisponível", 500)
     )
@@ -515,6 +788,57 @@ async def test_inventory_check_queries_item_type_with_owner_token():
     assert query["from"] == [{"collectionId": "items"}]
     assert query["where"]["fieldFilter"]["field"]["fieldPath"] == "itemTypeId"
     assert query["limit"] == 1
+
+
+@pytest.mark.asyncio
+async def test_item_type_inventory_query_includes_all_item_statuses():
+    client = FirebaseFirestoreClient(project_id="maphi-project")
+    client._request = AsyncMock(return_value=[])
+
+    await client.list_items_for_item_type("chocolate", "owner-token")
+
+    query = client._request.await_args.kwargs["payload"]["structuredQuery"]
+    assert client._request.await_args.kwargs["id_token"] == "owner-token"
+    assert query["from"] == [{"collectionId": "items"}]
+    assert query["where"]["fieldFilter"] == {
+        "field": {"fieldPath": "itemTypeId"},
+        "op": "EQUAL",
+        "value": {"stringValue": "chocolate"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_firestore_updates_item_names_with_field_mask():
+    client = FirebaseFirestoreClient(project_id="maphi-project")
+    client._request = AsyncMock(return_value={})
+
+    await client.update_documents_atomically(
+        "items",
+        [
+            (
+                "unit-1",
+                {"itemTypeName": {"stringValue": "Chocolate amargo"}},
+            )
+        ],
+        ["itemTypeName"],
+        "owner-token",
+    )
+
+    request_options = client._request.await_args.kwargs
+    assert request_options["payload"]["writes"] == [
+        {
+            "update": {
+                "name": (
+                    "projects/maphi-project/databases/(default)/documents/"
+                    "items/unit-1"
+                ),
+                "fields": {
+                    "itemTypeName": {"stringValue": "Chocolate amargo"}
+                },
+            },
+            "updateMask": {"fieldPaths": ["itemTypeName"]},
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -1370,7 +1694,7 @@ async def test_edit_form_shows_delete_only_when_no_inventory_exists(can_delete):
     view = object.__new__(CatalogView)
     view.on_check_item_type_inventory = AsyncMock(return_value=can_delete)
     view.on_message = lambda _: None
-    view.page = SimpleNamespace(show_dialog=lambda _: None)
+    view.page = SimpleNamespace(show_dialog=lambda _: None, update=Mock())
 
     await view._open_item_type_form(item_type=cake)
 
@@ -1387,7 +1711,7 @@ async def test_edit_button_opens_edit_form():
     view.controller = SimpleNamespace(quantities={"chocolate": 0})
     view.on_check_item_type_inventory = AsyncMock(return_value=True)
     view.on_message = lambda _: None
-    view.page = SimpleNamespace(show_dialog=shown_dialogs.append)
+    view.page = SimpleNamespace(show_dialog=shown_dialogs.append, update=Mock())
     cake = Cake("chocolate", "Chocolate", "Bolo", 0, "#F0E2D6")
 
     card = view._cake_card(cake)
@@ -1398,6 +1722,77 @@ async def test_edit_button_opens_edit_form():
 
     assert len(shown_dialogs) == 1
     assert shown_dialogs[0].title.value == "Editar sabor"
+
+
+@pytest.mark.asyncio
+async def test_edit_button_opens_form_if_inventory_check_fails():
+    shown_dialogs = []
+    view = object.__new__(CatalogView)
+    view.is_owner = True
+    view.controller = SimpleNamespace(quantities={"chocolate": 0})
+    view.on_check_item_type_inventory = AsyncMock(
+        side_effect=FirebaseRestError("Firestore indisponível", 503)
+    )
+    view.on_message = Mock()
+    view.page = SimpleNamespace(show_dialog=shown_dialogs.append, update=Mock())
+    cake = Cake("chocolate", "Chocolate", "Bolo", 0, "#F0E2D6")
+
+    card = view._cake_card(cake)
+    edit_button = card.content.content.controls[0].content.controls[2].content
+    await edit_button.on_click(None)
+
+    assert len(shown_dialogs) == 1
+    assert shown_dialogs[0].title.value == "Editar sabor"
+    assert shown_dialogs[0].modal is False
+    assert view.item_type_inventory_error.visible is True
+    assert "Firestore indisponível" in view.item_type_inventory_error.value
+    assert view.item_type_delete_button.visible is False
+    view.on_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_edit_form_opens_before_inventory_check_finishes():
+    inventory_check = asyncio.Event()
+    shown_dialogs = []
+    view = object.__new__(CatalogView)
+    view.is_owner = True
+    view.controller = SimpleNamespace(quantities={"chocolate": 0})
+
+    async def check_inventory(_item_type_id):
+        await inventory_check.wait()
+        return False
+
+    view.on_check_item_type_inventory = check_inventory
+    view.page = SimpleNamespace(show_dialog=shown_dialogs.append, update=Mock())
+    cake = Cake("chocolate", "Chocolate", "Bolo", 0, "#F0E2D6")
+
+    opening = asyncio.create_task(view._open_item_type_form(item_type=cake))
+    await asyncio.sleep(0)
+
+    assert len(shown_dialogs) == 1
+    assert shown_dialogs[0].title.value == "Editar sabor"
+
+    inventory_check.set()
+    await opening
+
+    assert view.item_type_delete_button.visible is False
+
+
+@pytest.mark.asyncio
+async def test_item_type_form_dismisses_outside_and_clears_edit_state():
+    view = object.__new__(CatalogView)
+    view.on_check_item_type_inventory = AsyncMock(return_value=True)
+    view.page = SimpleNamespace(show_dialog=Mock(), update=Mock())
+    cake = Cake("chocolate", "Chocolate", "Bolo", 0, "#F0E2D6")
+
+    await view._open_item_type_form(item_type=cake)
+
+    assert view.item_type_dialog.modal is False
+    assert view.item_type_dialog.on_dismiss == view._on_item_type_form_dismiss
+    view.item_type_dialog.on_dismiss(None)
+
+    assert view.item_type_dialog is None
+    assert view.editing_item_type is None
 
 
 @pytest.mark.asyncio
@@ -1504,6 +1899,27 @@ def test_logout_clears_user_and_firebase_tokens():
     assert controller.user_id is None
     assert controller.id_token is None
     assert controller.refresh_token is None
+
+
+@pytest.mark.asyncio
+async def test_logout_removes_persisted_session():
+    view = object.__new__(AuthView)
+    view.controller = SimpleNamespace(
+        sign_out_provider=AsyncMock(),
+        clear_persisted_session=AsyncMock(),
+        logout=Mock(),
+    )
+    view.on_auth_changed = Mock()
+    view.refresh_account_button = Mock()
+    view.on_message = Mock()
+    view.on_notice = Mock()
+
+    await view._logout()
+
+    view.controller.clear_persisted_session.assert_awaited_once()
+    view.controller.logout.assert_called_once()
+    view.on_notice.assert_called_once_with("Você saiu da sua conta.")
+    view.on_message.assert_not_called()
 
 
 def test_authenticated_account_button_offers_logout():
