@@ -70,7 +70,7 @@ jobs:
           fi
 
       - name: Build web app
-        run: flet build web --include .env
+        run: flet build web --include .env --yes
 
       - name: Remove temporary Firebase configuration
         if: always()
