@@ -62,6 +62,37 @@ py -m venv .venv
 
 ## Build e deploy
 
+### CI/CD com GitHub Actions
+
+O workflow `.github/workflows/firebase-hosting.yml` executa os testes e o build
+Web em pull requests direcionados a `main`. Ao enviar um commit para `main`,
+repete as validações e publica `build/web` no canal de produção do Firebase
+Hosting. O deploy não roda em pull requests, para não expor a credencial de
+deploy a código ainda não integrado.
+
+Configure estas **Actions variables** no repositório, em **Settings → Secrets
+and variables → Actions → Variables**:
+
+- `FIREBASE_API_KEY`
+- `AUTH_DOMAIN`
+- `PROJECT_ID`
+- `STORAGE_BUCKET`
+- `MESSAGING_SENDER_ID`
+- `APP_ID`
+- `MEASUREMENT_ID`
+
+São valores da configuração Web pública do Firebase, incorporados ao app
+estático durante o build. `PROJECT_ID` deve corresponder ao projeto padrão em
+`.firebaserc`.
+
+Configure também o secret **`FIREBASE_SERVICE_ACCOUNT`** em **Settings →
+Secrets and variables → Actions → Secrets**, com o JSON da conta de serviço
+autorizada a publicar no Firebase Hosting. Essa credencial é usada somente no
+deploy de commits em `main`; nunca a coloque em variáveis públicas, `.env` do
+cliente ou no repositório.
+
+### Build e deploy local
+
 Instale e autentique a Firebase CLI uma vez:
 
 ```powershell
