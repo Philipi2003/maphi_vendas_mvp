@@ -24,7 +24,7 @@ O **MaphiApp** é um sistema projetado para intermediar a venda, produção e lo
 - **RF01**: Inserção e controle de produções/unidades de bolos.
 - **RF02**: Gerenciamento de reservas (criação, cancelamento e visualização por donos e usuários).
 - **RF03 / RF04**: Gestão do catálogo de sabores e gestão de itens exclusivamente sob encomenda (`isCustomOrderOnly`).
-- **RF05**: Cadastro de pontos de retirada com janela de horário de permanência (`timeWindow`).
+- **RF05**: Cadastro de pontos de retirada com data e hora de chegada e saída (`arrivalAt`, `departureAt`).
 - **RF06**: Relatório/visualização do quantitativo de entregas pendentes por local de retirada, discriminado por tipo de venda (Promoção vs. Normal).
 - **RF07**: Disparo de notificações de novos lotes de estoque para a base de usuários.
 
@@ -105,9 +105,14 @@ enum ReservationStatus {
 - `id`: String
 - `name`: String
 - `address`: String
-- `timeWindow`: String (Ex: "14:00 - 17:00")
+- `arrivalAt`: Timestamp (data e hora local de chegada)
+- `departureAt`: Timestamp (data e hora local de saída)
 - `isActive`: Boolean
 - `createdAt`: Timestamp
+
+Locais disponíveis para reserva devem ter uma janela de permanência mínima de
+15 minutos e o horário de saída precisa estar a mais de 15 minutos do momento
+atual. Locais sem uma janela válida não são exibidos aos clientes.
 
 #### Reservation (Reserva de Pedido)
 - `id`: String

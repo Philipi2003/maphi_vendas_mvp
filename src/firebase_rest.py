@@ -53,6 +53,31 @@ class FirebaseFirestoreClient:
             payload={"fields": fields},
         )
 
+    async def create_documents_atomically(
+        self,
+        collection: str,
+        documents: list[tuple[str, dict]],
+        id_token: str,
+    ) -> dict:
+        if not documents:
+            raise ValueError("Informe ao menos um documento para criar.")
+        writes = [
+            {
+                "update": {
+                    "name": self._document_url(collection, document_id),
+                    "fields": fields,
+                },
+                "currentDocument": {"exists": False},
+            }
+            for document_id, fields in documents
+        ]
+        return await self._request(
+            f"{self._documents_url()}:commit",
+            id_token=id_token,
+            method="POST",
+            payload={"writes": writes},
+        )
+
     async def update_document(
         self,
         collection: str,
@@ -98,6 +123,42 @@ class FirebaseFirestoreClient:
             },
         )
 
+    async def list_available_items(self) -> list:
+        return await self._request(
+            f"{self._documents_url()}:runQuery",
+            method="POST",
+            payload={
+                "structuredQuery": {
+                    "from": [{"collectionId": "items"}],
+                    "where": {
+                        "fieldFilter": {
+                            "field": {"fieldPath": "status"},
+                            "op": "EQUAL",
+                            "value": {"stringValue": "DISPONIVEL"},
+                        }
+                    },
+                }
+            },
+        )
+
+    async def list_active_pickup_spots(self) -> list:
+        return await self._request(
+            f"{self._documents_url()}:runQuery",
+            method="POST",
+            payload={
+                "structuredQuery": {
+                    "from": [{"collectionId": "pickupSpots"}],
+                    "where": {
+                        "fieldFilter": {
+                            "field": {"fieldPath": "isActive"},
+                            "op": "EQUAL",
+                            "value": {"booleanValue": True},
+                        }
+                    },
+                }
+            },
+        )
+
     async def list_item_types(self, id_token: str) -> list:
         return await self._request(
             f"{self._documents_url()}:runQuery",
@@ -132,6 +193,13 @@ class FirebaseFirestoreClient:
             },
         )
         return any(row.get("document") for row in rows)
+
+    async def create_pickup_spot(
+        self, pickup_spot_id: str, fields: dict, id_token: str
+    ) -> dict:
+        return await self.create_document(
+            "pickupSpots", pickup_spot_id, fields, id_token
+        )
 
     async def _request(
         self,

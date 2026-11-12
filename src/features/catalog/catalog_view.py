@@ -17,6 +17,10 @@ from features.catalog.catalog_logic import (
 )
 from features.catalog.catalog_card_view import CatalogCardView
 from firebase_rest import FirebaseRestError
+from features.pickup_spots.pickup_spots_logic import (
+    PickupSpot,
+    PickupSpotController,
+)
 
 
 class CatalogView:
@@ -24,8 +28,12 @@ class CatalogView:
         self,
         page: ft.Page,
         controller: CatalogController,
+        pickup_spot_controller: PickupSpotController,
         account_button: ft.Control,
         on_reserve,
+        on_create_pickup_spot,
+        on_edit_pickup_spot,
+        on_delete_pickup_spot,
         on_create_item_type,
         on_update_item_type,
         on_delete_item_type,
@@ -35,7 +43,11 @@ class CatalogView:
     ):
         self.page = page
         self.controller = controller
+        self.pickup_spot_controller = pickup_spot_controller
         self.on_reserve = on_reserve
+        self.on_create_pickup_spot = on_create_pickup_spot
+        self.on_edit_pickup_spot = on_edit_pickup_spot
+        self.on_delete_pickup_spot = on_delete_pickup_spot
         self.on_create_item_type = on_create_item_type
         self.on_update_item_type = on_update_item_type
         self.on_delete_item_type = on_delete_item_type
@@ -65,6 +77,39 @@ class CatalogView:
             icon=ft.Icons.ADD,
             visible=False,
             on_click=self._open_item_type_form,
+        )
+        self.owner_add_pickup_spot_button = ft.OutlinedButton(
+            "Adicionar local de retirada",
+            icon=ft.Icons.ADD_LOCATION_ALT_OUTLINED,
+            visible=False,
+            on_click=self._open_pickup_spot_form,
+        )
+        self.pickup_spot_dropdown = ft.Dropdown(
+            label="Local de retirada",
+            hint_text="Carregando locais...",
+            options=[],
+            disabled=True,
+            on_select=self._pickup_spot_changed,
+        )
+        self.pickup_spot_edit_button = ft.OutlinedButton(
+            "Editar local",
+            icon=ft.Icons.EDIT_OUTLINED,
+            visible=False,
+            disabled=True,
+            on_click=self._edit_selected_pickup_spot,
+        )
+        self.pickup_spot_delete_button = ft.OutlinedButton(
+            "Excluir local",
+            icon=ft.Icons.DELETE_OUTLINE,
+            style=ft.ButtonStyle(color=ACCENT),
+            visible=False,
+            disabled=True,
+            on_click=self._ask_delete_selected_pickup_spot,
+        )
+        self.pickup_spot_details = ft.Text(
+            "Carregando locais de retirada...",
+            size=11,
+            color=MUTED,
         )
         self.results_label = ft.Text(color=MUTED, size=13)
         self.selection_label = ft.Text(
@@ -204,31 +249,42 @@ class CatalogView:
                         col={"xs": 12, "md": 4},
                         alignment=ft.Alignment.CENTER_RIGHT,
                         content=ft.Container(
-                            content=ft.Row(
+                            content=ft.Column(
                                 controls=[
-                                    ft.Icon(
-                                        ft.Icons.LOCAL_DINING_OUTLINED,
-                                        color=GREEN,
-                                        size=20,
-                                    ),
-                                    ft.Column(
+                                    ft.Row(
                                         controls=[
+                                            ft.Icon(
+                                                ft.Icons.LOCAL_DINING_OUTLINED,
+                                                color=GREEN,
+                                                size=20,
+                                            ),
                                             ft.Text(
-                                                "Retirada combinada",
+                                                "Escolha o local de retirada",
                                                 size=13,
                                                 color=INK,
                                                 weight=ft.FontWeight.W_600,
                                             ),
-                                            ft.Text(
-                                                "Escolha o local ao reservar",
-                                                size=11,
-                                                color=MUTED,
-                                            ),
                                         ],
-                                        spacing=2,
+                                        spacing=12,
                                     ),
+                                    ft.Row(
+                                        controls=[
+                                            self.pickup_spot_dropdown,
+                                        ],
+                                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                                        spacing=0,
+                                    ),
+                                    ft.Row(
+                                        controls=[
+                                            self.pickup_spot_edit_button,
+                                            self.pickup_spot_delete_button,
+                                        ],
+                                        spacing=8,
+                                        wrap=True,
+                                    ),
+                                    self.pickup_spot_details,
                                 ],
-                                spacing=12,
+                                spacing=8,
                             ),
                             bgcolor=SURFACE,
                             border=ft.Border.all(1, BORDER),
@@ -270,11 +326,14 @@ class CatalogView:
                 ft.Container(
                     col={"xs": 12, "sm": 6},
                     alignment=ft.Alignment.CENTER_RIGHT,
-                    content=ft.Row(
-                        controls=[self.selection_label, self.owner_add_button],
-                        alignment=ft.MainAxisAlignment.END,
-                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                        spacing=12,
+                    content=ft.Column(
+                        controls=[
+                            self.selection_label,
+                            self.owner_add_button,
+                            self.owner_add_pickup_spot_button,
+                        ],
+                        horizontal_alignment=ft.CrossAxisAlignment.END,
+                        spacing=8,
                     ),
                 ),
             ],
@@ -318,8 +377,154 @@ class CatalogView:
     def set_owner(self, is_owner: bool) -> None:
         self.is_owner = is_owner
         self.owner_add_button.visible = is_owner
+        self.owner_add_pickup_spot_button.visible = is_owner
+        if (
+            not is_owner
+            and self.pickup_spot_controller.selected_pickup_spot_id
+            not in {
+                spot.id
+                for spot in self.pickup_spot_controller.available_pickup_spots
+            }
+        ):
+            self.pickup_spot_controller.select_pickup_spot(None)
+        self.refresh_pickup_spot_options()
         self.refresh()
         self.page.update()
+
+    async def _open_pickup_spot_form(self, _=None) -> None:
+        await self.on_create_pickup_spot()
+
+    def refresh_pickup_spot_options(self) -> None:
+        pickup_spots = (
+            self.pickup_spot_controller.pickup_spots
+            if self.is_owner
+            else self.pickup_spot_controller.available_pickup_spots
+        )
+        visible_ids = {spot.id for spot in pickup_spots}
+        if (
+            not self.is_owner
+            and self.pickup_spot_controller.selected_pickup_spot_id
+            not in visible_ids
+        ):
+            self.pickup_spot_controller.select_pickup_spot(None)
+        self.pickup_spot_dropdown.options = [
+            ft.DropdownOption(
+                key=pickup_spot.id,
+                text=self._pickup_spot_option_text(pickup_spot),
+            )
+            for pickup_spot in pickup_spots
+        ]
+        self.pickup_spot_dropdown.value = (
+            self.pickup_spot_controller.selected_pickup_spot_id
+        )
+        self.pickup_spot_dropdown.disabled = not pickup_spots
+        self.pickup_spot_dropdown.hint_text = (
+            "Selecione um local de retirada"
+            if pickup_spots
+            else "Nenhum local de retirada disponível"
+        )
+        has_selected_spot = (
+            self.pickup_spot_controller.selected_pickup_spot is not None
+        )
+        self.pickup_spot_edit_button.visible = self.is_owner
+        self.pickup_spot_edit_button.disabled = not has_selected_spot
+        self.pickup_spot_delete_button.visible = self.is_owner
+        self.pickup_spot_delete_button.disabled = not has_selected_spot
+        self._refresh_pickup_spot_details()
+
+    def _pickup_spot_changed(self, event: ft.Event[ft.Dropdown]) -> None:
+        try:
+            self.pickup_spot_controller.select_pickup_spot(
+                event.control.value,
+                allow_unavailable=self.is_owner,
+            )
+        except ValueError as exc:
+            self.on_message(str(exc))
+        self.refresh_pickup_spot_options()
+        self.page.update()
+
+    def _refresh_pickup_spot_details(self) -> None:
+        pickup_spot = self.pickup_spot_controller.selected_pickup_spot
+        if pickup_spot is None:
+            self.pickup_spot_details.value = (
+                "Selecione um local de retirada."
+                if self.pickup_spot_dropdown.options
+                else "Nenhum local de retirada disponível."
+            )
+            return
+        schedule = self._pickup_spot_schedule(pickup_spot)
+        if not self.pickup_spot_controller.is_pickup_spot_available(pickup_spot):
+            schedule += " · fora da janela para reserva"
+        self.pickup_spot_details.value = (
+            f"{pickup_spot.address}\nRetirada: {schedule}"
+        )
+
+    @staticmethod
+    def _pickup_spot_schedule(pickup_spot: PickupSpot) -> str:
+        if pickup_spot.arrival_at is None or pickup_spot.departure_at is None:
+            return "Data e horário não definidos"
+        return (
+            f"{pickup_spot.arrival_at:%d/%m/%Y %H:%M} às "
+            f"{pickup_spot.departure_at:%d/%m/%Y %H:%M}"
+        )
+
+    def _pickup_spot_option_text(self, pickup_spot: PickupSpot) -> str:
+        schedule = self._pickup_spot_schedule(pickup_spot)
+        if (
+            self.is_owner
+            and not self.pickup_spot_controller.is_pickup_spot_available(
+                pickup_spot
+            )
+        ):
+            return f"{pickup_spot.name} · indisponível"
+        return f"{pickup_spot.name} · {schedule}"
+
+    async def _edit_selected_pickup_spot(self, _=None) -> None:
+        pickup_spot = self.pickup_spot_controller.selected_pickup_spot
+        if pickup_spot is not None:
+            await self.on_edit_pickup_spot(pickup_spot)
+
+    def _ask_delete_selected_pickup_spot(self, _=None) -> None:
+        pickup_spot = self.pickup_spot_controller.selected_pickup_spot
+        if pickup_spot is None:
+            return
+        self.page.show_dialog(
+            ft.AlertDialog(
+                modal=True,
+                title=ft.Text("Excluir local de retirada?"),
+                content=ft.Text(
+                    f'O local "{pickup_spot.name}" será removido permanentemente.'
+                ),
+                actions=[
+                    ft.TextButton(
+                        "Cancelar",
+                        on_click=lambda _: self.page.pop_dialog(),
+                    ),
+                    ft.TextButton(
+                        "Excluir",
+                        on_click=self._delete_selected_pickup_spot,
+                    ),
+                ],
+                actions_alignment=ft.MainAxisAlignment.END,
+            )
+        )
+
+    async def _delete_selected_pickup_spot(self, _=None) -> None:
+        pickup_spot = self.pickup_spot_controller.selected_pickup_spot
+        if pickup_spot is None:
+            return
+        try:
+            await self.on_delete_pickup_spot(pickup_spot.id)
+            self.page.pop_dialog()
+            self.refresh_pickup_spot_options()
+            self.page.update()
+            self.on_notice("Local de retirada excluído.")
+        except FirebaseRestError as exc:
+            self.on_message(
+                f"Não foi possível excluir o local de retirada: {exc}"
+            )
+        except ValueError as exc:
+            self.on_message(str(exc))
 
     async def _open_item_type_form(
         self, _=None, *, item_type: Cake | None = None

@@ -118,8 +118,15 @@ estas coleções e campos:
   exclusão quando não há documentos de estoque associados ao sabor.
 - `items`: `itemTypeId`, `itemTypeName`, `status`, `expirationDate` (opcional),
   `createdAt`. Leitura pública apenas das unidades com status `DISPONIVEL`.
-- `pickupSpots`: `name`, `address`, `timeWindow`, `isActive`, `createdAt`.
-  Leitura pública apenas dos locais ativos.
+- `pickupSpots`: `name`, `address`, `arrivalAt`, `departureAt`, `isActive`,
+  `createdAt`. Chegada e saída são timestamps completos, inseridos no horário
+  local de São Paulo (`DD/MM/AAAA HH:MM`). A janela deve ter pelo menos 15 minutos;
+  para clientes, o local só aparece quando a saída ainda estiver a mais de
+  15 minutos do horário atual. O dono pode criar, editar e excluir locais pelo
+  catálogo, inclusive remover locais obsoletos. Locais legados sem timestamps
+  completos ficam ocultos para clientes e podem ser editados ou removidos pelo
+  dono. O catálogo mantém o ID do local selecionado no estado da aplicação para
+  uso pela futura funcionalidade de reserva.
 - `users/{uid}`: `name`, `phone`, `createdAt`. Cada usuário lê e altera apenas
   seu próprio perfil; não pode definir seu próprio papel.
 - `reservations`: `userId`, `pickupSpotId`, `itemIds`, `itemTypeNames`,

@@ -1,6 +1,8 @@
 import inspect
+from datetime import date, datetime, time
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
+from zoneinfo import ZoneInfo
 
 import flet as ft
 import pytest
@@ -14,6 +16,11 @@ from features.catalog.catalog_logic import (
     ItemTypeImageCleanupError,
 )
 from features.catalog.catalog_view import CatalogView
+from features.pickup_spots.pickup_spots_logic import (
+    PickupSpot,
+    PickupSpotController,
+)
+from features.pickup_spots.pickup_spots_view import PickupSpotFormView
 from firebase_rest import (
     FirebaseFirestoreClient,
     FirebaseRestError,
@@ -507,6 +514,556 @@ async def test_inventory_check_queries_item_type_with_owner_token():
     assert query["from"] == [{"collectionId": "items"}]
     assert query["where"]["fieldFilter"]["field"]["fieldPath"] == "itemTypeId"
     assert query["limit"] == 1
+
+
+@pytest.mark.asyncio
+async def test_active_pickup_spot_query_only_returns_active_locations():
+    client = FirebaseFirestoreClient(project_id="maphi-project")
+    client._request = AsyncMock(return_value=[])
+
+    await client.list_active_pickup_spots()
+
+    request_url = client._request.await_args.args[0]
+    request_options = client._request.await_args.kwargs
+    assert request_url.endswith("/documents:runQuery")
+    assert request_options["payload"]["structuredQuery"]["from"] == [
+        {"collectionId": "pickupSpots"}
+    ]
+    assert (
+        request_options["payload"]["structuredQuery"]["where"]["fieldFilter"]
+        == {
+            "field": {"fieldPath": "isActive"},
+            "op": "EQUAL",
+            "value": {"booleanValue": True},
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_pickup_spots_load_and_selected_location_state():
+    controller = PickupSpotController()
+    controller.firestore_client.list_active_pickup_spots = AsyncMock(
+        return_value=[
+            {
+                "document": {
+                    "name": "projects/maphi/databases/(default)/documents/pickupSpots/centro",
+                    "fields": {
+                        "name": {"stringValue": "Loja do Centro"},
+                        "address": {"stringValue": "Rua A, 123"},
+                        "arrivalAt": {
+                            "timestampValue": "2099-12-01T13:00:00Z"
+                        },
+                        "departureAt": {
+                            "timestampValue": "2099-12-01T21:00:00Z"
+                        },
+                    },
+                }
+            }
+        ]
+    )
+
+    await controller.load_active_pickup_spots()
+    controller.select_pickup_spot("centro")
+
+    assert controller.selected_pickup_spot_id == "centro"
+    assert controller.selected_pickup_spot == PickupSpot(
+        id="centro",
+        name="Loja do Centro",
+        address="Rua A, 123",
+        arrival_at=datetime(
+            2099, 12, 1, 10, 0, tzinfo=ZoneInfo("America/Sao_Paulo")
+        ),
+        departure_at=datetime(
+            2099, 12, 1, 18, 0, tzinfo=ZoneInfo("America/Sao_Paulo")
+        ),
+    )
+
+    controller.firestore_client.list_active_pickup_spots.return_value = []
+    await controller.load_active_pickup_spots()
+
+    assert controller.pickup_spots == []
+    assert controller.selected_pickup_spot_id is None
+
+
+def test_catalog_displays_pickup_location_and_schedule():
+    pickup_spot = PickupSpot(
+        id="centro",
+        name="Loja do Centro",
+        address="Rua A, 123",
+        arrival_at=datetime(
+            2099, 12, 1, 10, 0, tzinfo=ZoneInfo("America/Sao_Paulo")
+        ),
+        departure_at=datetime(
+            2099, 12, 1, 18, 0, tzinfo=ZoneInfo("America/Sao_Paulo")
+        ),
+    )
+    controller = PickupSpotController()
+    controller.pickup_spots = [pickup_spot]
+    controller.select_pickup_spot("centro")
+    view = object.__new__(CatalogView)
+    view.pickup_spot_controller = controller
+    view.is_owner = False
+    view.pickup_spot_dropdown = SimpleNamespace()
+    view.pickup_spot_details = SimpleNamespace()
+    view.pickup_spot_edit_button = SimpleNamespace()
+    view.pickup_spot_delete_button = SimpleNamespace()
+
+    view.refresh_pickup_spot_options()
+
+    option = view.pickup_spot_dropdown.options[0]
+    assert option.key == "centro"
+    assert option.text == "Loja do Centro · 01/12/2099 10:00 às 01/12/2099 18:00"
+    assert view.pickup_spot_dropdown.value == "centro"
+    assert view.pickup_spot_dropdown.disabled is False
+    assert "Rua A, 123" in view.pickup_spot_details.value
+    assert "01/12/2099 10:00 às 01/12/2099 18:00" in view.pickup_spot_details.value
+    assert view.pickup_spot_edit_button.visible is False
+    assert view.pickup_spot_delete_button.visible is False
+
+
+def test_obsolete_pickup_spots_are_hidden_from_customers_but_manageable_by_owner():
+    obsolete_spot = PickupSpot(
+        id="centro",
+        name="Loja do Centro",
+        address="Rua A, 123",
+        arrival_at=datetime(
+            2020, 12, 1, 10, 0, tzinfo=ZoneInfo("America/Sao_Paulo")
+        ),
+        departure_at=datetime(
+            2020, 12, 1, 18, 0, tzinfo=ZoneInfo("America/Sao_Paulo")
+        ),
+    )
+    controller = PickupSpotController()
+    controller.pickup_spots = [obsolete_spot]
+    view = object.__new__(CatalogView)
+    view.pickup_spot_controller = controller
+    view.is_owner = False
+    view.pickup_spot_dropdown = SimpleNamespace()
+    view.pickup_spot_details = SimpleNamespace()
+    view.pickup_spot_edit_button = SimpleNamespace()
+    view.pickup_spot_delete_button = SimpleNamespace()
+
+    view.refresh_pickup_spot_options()
+
+    assert view.pickup_spot_dropdown.options == []
+    assert view.pickup_spot_dropdown.disabled is True
+    assert view.pickup_spot_dropdown.hint_text == "Nenhum local de retirada disponível"
+
+    view.is_owner = True
+    controller.select_pickup_spot("centro", allow_unavailable=True)
+    view.refresh_pickup_spot_options()
+
+    assert len(view.pickup_spot_dropdown.options) == 1
+    assert view.pickup_spot_dropdown.options[0].text.endswith("indisponível")
+    assert view.pickup_spot_edit_button.visible is True
+    assert view.pickup_spot_delete_button.visible is True
+
+
+def test_catalog_view_builds_pickup_selector_with_owner_actions():
+    pickup_controller = PickupSpotController()
+    pickup_controller.pickup_spots = [
+        PickupSpot(
+            id="old",
+            name="Local antigo",
+            address="Rua A",
+            arrival_at=datetime(
+                2020, 12, 1, 10, 0, tzinfo=ZoneInfo("America/Sao_Paulo")
+            ),
+            departure_at=datetime(
+                2020, 12, 1, 18, 0, tzinfo=ZoneInfo("America/Sao_Paulo")
+            ),
+        )
+    ]
+    page = SimpleNamespace(
+        services=[],
+        floating_action_button=None,
+        update=Mock(),
+    )
+    view = CatalogView(
+        page=page,
+        controller=CatalogController(),
+        pickup_spot_controller=pickup_controller,
+        account_button=ft.Text("Conta"),
+        on_reserve=Mock(),
+        on_create_pickup_spot=AsyncMock(),
+        on_edit_pickup_spot=AsyncMock(),
+        on_delete_pickup_spot=AsyncMock(),
+        on_create_item_type=AsyncMock(),
+        on_update_item_type=AsyncMock(),
+        on_delete_item_type=AsyncMock(),
+        on_check_item_type_inventory=AsyncMock(),
+        on_notice=Mock(),
+        on_message=Mock(),
+    )
+
+    view.set_owner(True)
+    assert view.pickup_spot_edit_button.visible is True
+    assert view.pickup_spot_edit_button.disabled is True
+    assert view.pickup_spot_delete_button.visible is True
+    assert view.pickup_spot_delete_button.disabled is True
+
+    pickup_controller.select_pickup_spot("old", allow_unavailable=True)
+    view.refresh_pickup_spot_options()
+
+    assert view.pickup_spot_dropdown.hint_text == "Selecione um local de retirada"
+    assert view.pickup_spot_dropdown.options[0].text.endswith("indisponível")
+    assert view.pickup_spot_edit_button.visible is True
+    assert view.pickup_spot_edit_button.disabled is False
+    assert view.pickup_spot_delete_button.visible is True
+    assert view.pickup_spot_delete_button.disabled is False
+
+
+def test_pickup_spot_availability_requires_fifteen_minutes_before_closing():
+    now = datetime(
+        2099, 12, 1, 10, 0, tzinfo=ZoneInfo("America/Sao_Paulo")
+    )
+    available_spot = PickupSpot(
+        id="available",
+        name="Aberto",
+        address="Rua A",
+        arrival_at=datetime(
+            2099, 12, 1, 9, 0, tzinfo=ZoneInfo("America/Sao_Paulo")
+        ),
+        departure_at=datetime(
+            2099, 12, 1, 10, 16, tzinfo=ZoneInfo("America/Sao_Paulo")
+        ),
+    )
+    closing_in_fifteen_minutes = PickupSpot(
+        id="closing",
+        name="Fechando",
+        address="Rua B",
+        arrival_at=available_spot.arrival_at,
+        departure_at=datetime(
+            2099, 12, 1, 10, 15, tzinfo=ZoneInfo("America/Sao_Paulo")
+        ),
+    )
+    too_short_window = PickupSpot(
+        id="short",
+        name="Janela curta",
+        address="Rua C",
+        arrival_at=datetime(
+            2099, 12, 1, 10, 10, tzinfo=ZoneInfo("America/Sao_Paulo")
+        ),
+        departure_at=datetime(
+            2099, 12, 1, 10, 20, tzinfo=ZoneInfo("America/Sao_Paulo")
+        ),
+    )
+
+    assert PickupSpotController.is_pickup_spot_available(
+        available_spot, now=now
+    )
+    assert not PickupSpotController.is_pickup_spot_available(
+        closing_in_fifteen_minutes, now=now
+    )
+    assert not PickupSpotController.is_pickup_spot_available(
+        too_short_window, now=now
+    )
+
+
+@pytest.mark.asyncio
+async def test_pickup_spot_creation_persists_normalized_fields():
+    controller = PickupSpotController()
+    controller.firestore_client.create_pickup_spot = AsyncMock(return_value={})
+
+    pickup_spot = await controller.create_pickup_spot(
+        name="  Loja do Centro ",
+        address=" Rua A, 123 ",
+        arrival_at="15/11/2026 09:30",
+        departure_at="15/11/2026 17:45",
+        id_token="owner-token",
+    )
+
+    assert pickup_spot.name == "Loja do Centro"
+    assert pickup_spot.address == "Rua A, 123"
+    assert pickup_spot.arrival_at == datetime(
+        2026, 11, 15, 9, 30, tzinfo=ZoneInfo("America/Sao_Paulo")
+    )
+    assert pickup_spot.departure_at == datetime(
+        2026, 11, 15, 17, 45, tzinfo=ZoneInfo("America/Sao_Paulo")
+    )
+    assert pickup_spot.is_active is True
+    fields = controller.firestore_client.create_pickup_spot.await_args.args[1]
+    assert fields["name"] == {"stringValue": "Loja do Centro"}
+    assert fields["address"] == {"stringValue": "Rua A, 123"}
+    assert fields["arrivalAt"] == {
+        "timestampValue": "2026-11-15T12:30:00Z"
+    }
+    assert fields["departureAt"] == {
+        "timestampValue": "2026-11-15T20:45:00Z"
+    }
+    assert fields["isActive"] == {"booleanValue": True}
+    assert "timestampValue" in fields["createdAt"]
+    assert controller.firestore_client.create_pickup_spot.await_args.args[2] == (
+        "owner-token"
+    )
+
+
+def test_pickup_spot_form_builds_with_calendar_and_time_pickers():
+    page = SimpleNamespace(show_dialog=Mock())
+    view = PickupSpotFormView(
+        page,
+        on_create=AsyncMock(),
+        on_update=AsyncMock(),
+        on_notice=Mock(),
+        on_message=Mock(),
+    )
+
+    view.open_form()
+
+    assert isinstance(view.arrival_date_picker, ft.DatePicker)
+    assert isinstance(view.arrival_time_picker, ft.TimePicker)
+    assert isinstance(view.departure_date_picker, ft.DatePicker)
+    assert isinstance(view.departure_time_picker, ft.TimePicker)
+    assert view.arrival_time_picker.hour_format == ft.TimePickerHourFormat.H24
+    assert (
+        view.arrival_time_picker.entry_mode
+        == ft.TimePickerEntryMode.INPUT_ONLY
+    )
+    assert view.arrival_date_picker.locale == ft.Locale("pt", "BR")
+    assert view.departure_date_picker.locale == ft.Locale("pt", "BR")
+    assert view.arrival_date_label.value == "Selecionar data"
+    assert view.departure_time_label.value == "Selecionar horário"
+    assert view.dialog.modal is False
+    assert view.dialog.on_dismiss == view._on_dismiss
+    page.show_dialog.assert_called_once_with(view.dialog)
+    view._open_arrival_date_picker()
+    assert page.show_dialog.call_args.args[0] is view.arrival_date_picker
+
+
+@pytest.mark.asyncio
+async def test_pickup_spot_edit_form_submits_selected_id_and_datetime():
+    page = SimpleNamespace(
+        show_dialog=Mock(),
+        update=Mock(),
+        pop_dialog=Mock(),
+    )
+    existing = PickupSpot(
+        id="centro",
+        name="Loja do Centro",
+        address="Rua A, 123",
+        arrival_at=datetime(
+            2099, 12, 1, 10, 0, tzinfo=ZoneInfo("America/Sao_Paulo")
+        ),
+        departure_at=datetime(
+            2099, 12, 1, 18, 0, tzinfo=ZoneInfo("America/Sao_Paulo")
+        ),
+    )
+    on_update = AsyncMock()
+    view = PickupSpotFormView(
+        page,
+        on_create=AsyncMock(),
+        on_update=on_update,
+        on_notice=Mock(),
+        on_message=Mock(),
+    )
+    view.open_form(existing)
+    assert view.arrival_date == date(2099, 12, 1)
+    assert view.arrival_time == time(10, 0)
+    assert view.departure_date == date(2099, 12, 1)
+    assert view.departure_time == time(18, 0)
+    assert view.arrival_date_picker.value == date(2099, 12, 1)
+    assert view.departure_time_picker.value == time(18, 0)
+    view._arrival_date_changed(
+        SimpleNamespace(
+            control=SimpleNamespace(value=date(2099, 12, 2))
+        )
+    )
+    view._arrival_time_changed(
+        SimpleNamespace(control=SimpleNamespace(value=time(11, 0)))
+    )
+    view._departure_date_changed(
+        SimpleNamespace(
+            control=SimpleNamespace(value=date(2099, 12, 2))
+        )
+    )
+    view._departure_time_changed(
+        SimpleNamespace(control=SimpleNamespace(value=time(19, 0)))
+    )
+
+    await view._submit()
+
+    on_update.assert_awaited_once_with(
+        pickup_spot_id="centro",
+        name="Loja do Centro",
+        address="Rua A, 123",
+        arrival_at="02/12/2099 11:00",
+        departure_at="02/12/2099 19:00",
+    )
+    assert view.dialog is None
+
+
+@pytest.mark.asyncio
+async def test_pickup_spot_form_requires_date_and_time_selection():
+    page = SimpleNamespace(
+        show_dialog=Mock(),
+        update=Mock(),
+        pop_dialog=Mock(),
+    )
+    on_create = AsyncMock()
+    view = PickupSpotFormView(
+        page,
+        on_create=on_create,
+        on_update=AsyncMock(),
+        on_notice=Mock(),
+        on_message=Mock(),
+    )
+    view.open_form()
+    view.name_field.value = "Loja do Centro"
+    view.address_field.value = "Rua A, 123"
+
+    await view._submit()
+
+    assert view.form_error.visible is True
+    assert "data e o horário de chegada" in view.form_error.value
+    on_create.assert_not_awaited()
+
+
+def test_dismissing_pickup_spot_form_clears_dialog_state():
+    page = SimpleNamespace(show_dialog=Mock(), pop_dialog=Mock())
+    view = PickupSpotFormView(
+        page,
+        on_create=AsyncMock(),
+        on_update=AsyncMock(),
+        on_notice=Mock(),
+        on_message=Mock(),
+    )
+    view.open_form()
+
+    view.dialog.on_dismiss(None)
+
+    assert view.dialog is None
+    view._close()
+    page.pop_dialog.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_pickup_spot_validation_error_is_shown_inside_the_form():
+    page = SimpleNamespace(
+        show_dialog=Mock(),
+        update=Mock(),
+        pop_dialog=Mock(),
+    )
+    on_message = Mock()
+    view = PickupSpotFormView(
+        page,
+        on_create=AsyncMock(
+            side_effect=ValueError(
+                "A saída deve ser posterior à chegada."
+            )
+        ),
+        on_update=AsyncMock(),
+        on_notice=Mock(),
+        on_message=on_message,
+    )
+    view.open_form()
+    view.name_field.value = "Loja do Centro"
+    view.address_field.value = "Rua A, 123"
+    view._arrival_date_changed(
+        SimpleNamespace(
+            control=SimpleNamespace(value=date(2026, 11, 12))
+        )
+    )
+    view._arrival_time_changed(
+        SimpleNamespace(control=SimpleNamespace(value=time(18, 0)))
+    )
+    view._departure_date_changed(
+        SimpleNamespace(
+            control=SimpleNamespace(value=date(2026, 11, 12))
+        )
+    )
+    view._departure_time_changed(
+        SimpleNamespace(control=SimpleNamespace(value=time(17, 0)))
+    )
+
+    await view._submit()
+
+    assert view.form_error.visible is True
+    assert "posterior" in view.form_error.value
+    assert view.dialog is not None
+    on_message.assert_not_called()
+
+    view._arrival_time_changed(
+        SimpleNamespace(control=SimpleNamespace(value=time(18, 0)))
+    )
+
+    assert view.form_error.visible is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("name", "address", "arrival_at", "departure_at", "message"),
+    [
+        (" ", "Rua A, 123", "15/11/2026 09:00", "15/11/2026 17:00", "nome"),
+        ("Centro", " ", "15/11/2026 09:00", "15/11/2026 17:00", "endereço"),
+        ("Centro", "Rua A, 123", "15/11/2026 9h", "15/11/2026 17:00", "chegada"),
+        ("Centro", "Rua A, 123", "15/11/2026 09:00", "15/11/2026 17h", "saída"),
+        ("Centro", "Rua A, 123", "15/11/2026 18:00", "15/11/2026 17:00", "posterior"),
+        ("Centro", "Rua A, 123", "15/11/2026 09:00", "15/11/2026 09:10", "15 minutos"),
+    ],
+)
+async def test_pickup_spot_creation_requires_all_reservation_details(
+    name, address, arrival_at, departure_at, message
+):
+    controller = PickupSpotController()
+    controller.firestore_client.create_pickup_spot = AsyncMock()
+
+    with pytest.raises(ValueError, match=message):
+        await controller.create_pickup_spot(
+            name=name,
+            address=address,
+            arrival_at=arrival_at,
+            departure_at=departure_at,
+            id_token="owner-token",
+        )
+
+    controller.firestore_client.create_pickup_spot.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_pickup_spot_update_and_delete_preserve_selection_state():
+    pickup_spot = PickupSpot(
+        id="centro",
+        name="Loja do Centro",
+        address="Rua A, 123",
+        arrival_at=datetime(
+            2099, 12, 1, 10, 0, tzinfo=ZoneInfo("America/Sao_Paulo")
+        ),
+        departure_at=datetime(
+            2099, 12, 1, 18, 0, tzinfo=ZoneInfo("America/Sao_Paulo")
+        ),
+    )
+    controller = PickupSpotController()
+    controller.pickup_spots = [pickup_spot]
+    controller.select_pickup_spot("centro")
+    controller.firestore_client.update_document = AsyncMock(return_value={})
+    controller.firestore_client.delete_document = AsyncMock(return_value={})
+
+    updated = await controller.update_pickup_spot(
+        pickup_spot_id="centro",
+        name="Loja Central",
+        address="Rua B, 456",
+        arrival_at="02/12/2099 11:00",
+        departure_at="02/12/2099 19:00",
+        id_token="owner-token",
+    )
+
+    assert updated.name == "Loja Central"
+    assert updated.arrival_at == datetime(
+        2099, 12, 2, 11, 0, tzinfo=ZoneInfo("America/Sao_Paulo")
+    )
+    assert controller.selected_pickup_spot_id == "centro"
+    saved_fields = controller.firestore_client.update_document.await_args.args[2]
+    assert saved_fields["arrivalAt"] == {
+        "timestampValue": "2099-12-02T14:00:00Z"
+    }
+
+    await controller.delete_pickup_spot("centro", "owner-token")
+
+    controller.firestore_client.delete_document.assert_awaited_once_with(
+        "pickupSpots", "centro", "owner-token"
+    )
+    assert controller.pickup_spots == []
+    assert controller.selected_pickup_spot_id is None
 
 
 @pytest.mark.asyncio

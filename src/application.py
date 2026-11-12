@@ -5,6 +5,11 @@ from features.auth.auth_logic import AuthController
 from features.auth.auth_view import AuthView
 from features.catalog.catalog_logic import CatalogController
 from features.catalog.catalog_view import CatalogView
+from features.pickup_spots.pickup_spots_logic import (
+    PickupSpot,
+    PickupSpotController,
+)
+from features.pickup_spots.pickup_spots_view import PickupSpotFormView
 from firebase_rest import FirebaseRestError
 
 
@@ -14,6 +19,7 @@ class MaphiApplication:
         configure_page(page)
         self.auth_controller = AuthController()
         self.catalog_controller = CatalogController()
+        self.pickup_spot_controller = PickupSpotController()
         self.auth_view = AuthView(
             page=page,
             controller=self.auth_controller,
@@ -23,11 +29,22 @@ class MaphiApplication:
             on_mobile_open=self.hide_catalog,
             on_mobile_close=self.show_catalog,
         )
+        self.pickup_spot_form_view = PickupSpotFormView(
+            page=page,
+            on_create=self.create_pickup_spot,
+            on_update=self.update_pickup_spot,
+            on_notice=self.show_notice,
+            on_message=self.show_message,
+        )
         self.catalog_view = CatalogView(
             page=page,
             controller=self.catalog_controller,
+            pickup_spot_controller=self.pickup_spot_controller,
             account_button=self.auth_view.account_button,
             on_reserve=self.start_reservation,
+            on_create_pickup_spot=self.open_pickup_spot_form,
+            on_edit_pickup_spot=self.edit_pickup_spot,
+            on_delete_pickup_spot=self.delete_pickup_spot,
             on_create_item_type=self.create_item_type,
             on_update_item_type=self.update_item_type,
             on_delete_item_type=self.delete_item_type,
@@ -41,6 +58,7 @@ class MaphiApplication:
         )
         page.add(self.root)
         page.run_task(self.load_database_item_types)
+        page.run_task(self.load_database_pickup_spots)
         if page.pyodide:
             page.run_task(self.prepare_google_auth)
 
@@ -88,6 +106,16 @@ class MaphiApplication:
             self.page.update()
         except FirebaseRestError as exc:
             self.show_message(f"Não foi possível carregar os sabores do Firestore: {exc}")
+
+    async def load_database_pickup_spots(self) -> None:
+        try:
+            await self.pickup_spot_controller.load_active_pickup_spots()
+            self.catalog_view.refresh_pickup_spot_options()
+            self.page.update()
+        except FirebaseRestError as exc:
+            self.show_message(
+                f"Não foi possível carregar os locais de retirada: {exc}"
+            )
 
     async def prepare_google_auth(self) -> None:
         try:
@@ -184,6 +212,89 @@ class MaphiApplication:
         await self.catalog_controller.delete_item_type(
             item_type_id, self.auth_controller.id_token
         )
+
+    async def open_pickup_spot_form(self) -> None:
+        if not self.auth_controller.is_owner:
+            self.show_message("Apenas uma conta de dono pode criar locais de retirada.")
+            return
+        self.pickup_spot_form_view.open_form()
+
+    async def edit_pickup_spot(self, pickup_spot: PickupSpot) -> None:
+        if (
+            not self.auth_controller.is_owner
+            or not self.auth_controller.id_token
+        ):
+            self.show_message("Apenas o dono pode editar locais de retirada.")
+            return
+        self.pickup_spot_form_view.open_form(pickup_spot)
+
+    async def create_pickup_spot(
+        self,
+        *,
+        name: str,
+        address: str,
+        arrival_at: str,
+        departure_at: str,
+    ):
+        if (
+            not self.auth_controller.is_owner
+            or not self.auth_controller.id_token
+        ):
+            raise ValueError(
+                "Apenas uma conta de dono autenticada pode criar locais de retirada."
+            )
+        pickup_spot = await self.pickup_spot_controller.create_pickup_spot(
+            name=name,
+            address=address,
+            arrival_at=arrival_at,
+            departure_at=departure_at,
+            id_token=self.auth_controller.id_token,
+        )
+        self.catalog_view.refresh_pickup_spot_options()
+        self.page.update()
+        return pickup_spot
+
+    async def update_pickup_spot(
+        self,
+        *,
+        pickup_spot_id: str,
+        name: str,
+        address: str,
+        arrival_at: str,
+        departure_at: str,
+    ):
+        if (
+            not self.auth_controller.is_owner
+            or not self.auth_controller.id_token
+        ):
+            raise ValueError(
+                "Apenas uma conta de dono autenticada pode editar locais de retirada."
+            )
+        pickup_spot = await self.pickup_spot_controller.update_pickup_spot(
+            pickup_spot_id=pickup_spot_id,
+            name=name,
+            address=address,
+            arrival_at=arrival_at,
+            departure_at=departure_at,
+            id_token=self.auth_controller.id_token,
+        )
+        self.catalog_view.refresh_pickup_spot_options()
+        self.page.update()
+        return pickup_spot
+
+    async def delete_pickup_spot(self, pickup_spot_id: str) -> None:
+        if (
+            not self.auth_controller.is_owner
+            or not self.auth_controller.id_token
+        ):
+            raise ValueError(
+                "Apenas uma conta de dono autenticada pode excluir locais de retirada."
+            )
+        await self.pickup_spot_controller.delete_pickup_spot(
+            pickup_spot_id, self.auth_controller.id_token
+        )
+        self.catalog_view.refresh_pickup_spot_options()
+        self.page.update()
 
     def hide_catalog(self) -> None:
         self.catalog_view.root.visible = False

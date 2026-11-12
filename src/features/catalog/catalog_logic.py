@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 import math
@@ -10,6 +10,8 @@ from firebase_rest import (
     FirebaseRestError,
     FirebaseStorageClient,
 )
+
+MAX_STOCK_BATCH_UNITS = 500
 
 
 class ItemTypeImageCleanupError(RuntimeError):
@@ -50,6 +52,21 @@ class CatalogController:
             if include_inactive and id_token
             else await self.firestore_client.list_active_item_types()
         )
+        available_items = await self.firestore_client.list_available_items()
+        stock_counts: dict[str, int] = {}
+        for row in available_items:
+            document = row.get("document")
+            if not document:
+                continue
+            fields = document.get("fields", {})
+            if fields.get("status", {}).get("stringValue") != "DISPONIVEL":
+                continue
+            item_type_id = fields.get("itemTypeId", {}).get("stringValue", "")
+            if item_type_id:
+                stock_counts[item_type_id] = (
+                    stock_counts.get(item_type_id, 0) + 1
+                )
+
         colors = ("#F0E2D6", "#F4E9D5", "#F3E4E6", "#E9EEDC", "#F2E6D5")
         cakes = []
         seen_ids = set()
@@ -69,7 +86,7 @@ class CatalogController:
                 description=fields.get("description", {}).get(
                     "stringValue", ""
                 ),
-                stock=0,
+                stock=stock_counts.get(item_type_id, 0),
                 color=colors[len(cakes) % len(colors)],
                 image_url=fields.get("imageUrl", {}).get("stringValue", ""),
                 is_custom_order_only=fields.get(
@@ -123,6 +140,54 @@ class CatalogController:
         self.quantities[cake_id] = max(
             0, min(cake.stock, self.quantities[cake_id] + amount)
         )
+
+    async def add_stock(
+        self, quantities: dict[str, int], id_token: str
+    ) -> int:
+        if not id_token:
+            raise ValueError("Entre com uma conta de dono para registrar a produção.")
+        if not quantities:
+            raise ValueError("Adicione ao menos um sabor à produção.")
+
+        cakes_by_id = {cake.id: cake for cake in self.cakes}
+        for item_type_id, quantity in quantities.items():
+            if item_type_id not in cakes_by_id:
+                raise ValueError("Um dos sabores selecionados não existe mais.")
+            if type(quantity) is not int or quantity <= 0:
+                raise ValueError("A quantidade de cada sabor deve ser um inteiro positivo.")
+
+        total_units = sum(quantities.values())
+        if total_units > MAX_STOCK_BATCH_UNITS:
+            raise ValueError(
+                f"Cada inserção pode conter no máximo {MAX_STOCK_BATCH_UNITS} bolos."
+            )
+
+        created_at = (
+            datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        )
+        documents = []
+        stock_by_type: dict[str, int] = {}
+        for item_type_id, quantity in quantities.items():
+            cake = cakes_by_id[item_type_id]
+            stock_by_type[item_type_id] = quantity
+            fields = {
+                "itemTypeId": {"stringValue": cake.id},
+                "itemTypeName": {"stringValue": cake.name},
+                "status": {"stringValue": "DISPONIVEL"},
+                "createdAt": {"timestampValue": created_at},
+            }
+            documents.extend(
+                (uuid.uuid4().hex, fields.copy()) for _ in range(quantity)
+            )
+
+        await self.firestore_client.create_documents_atomically(
+            "items", documents, id_token
+        )
+        self.cakes = [
+            replace(cake, stock=cake.stock + stock_by_type.get(cake.id, 0))
+            for cake in self.cakes
+        ]
+        return total_units
 
     async def create_item_type(
         self,
