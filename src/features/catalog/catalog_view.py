@@ -31,6 +31,7 @@ class CatalogView:
         pickup_spot_controller: PickupSpotController,
         account_button: ft.Control,
         on_reserve,
+        on_add_stock,
         on_create_pickup_spot,
         on_edit_pickup_spot,
         on_delete_pickup_spot,
@@ -45,6 +46,7 @@ class CatalogView:
         self.controller = controller
         self.pickup_spot_controller = pickup_spot_controller
         self.on_reserve = on_reserve
+        self.on_add_stock = on_add_stock
         self.on_create_pickup_spot = on_create_pickup_spot
         self.on_edit_pickup_spot = on_edit_pickup_spot
         self.on_delete_pickup_spot = on_delete_pickup_spot
@@ -125,6 +127,30 @@ class CatalogView:
             height=56,
             on_click=lambda _: self.on_reserve(),
             visible=False,
+        )
+        self.production_button = ft.FloatingActionButton(
+            content=ft.Row(
+                controls=[
+                    ft.Icon(
+                        ft.Icons.ADD_CIRCLE_OUTLINE,
+                        color=ft.Colors.WHITE,
+                    ),
+                    ft.Text(
+                        "Registrar produção",
+                        color=ft.Colors.WHITE,
+                        weight=ft.FontWeight.W_600,
+                    ),
+                ],
+                spacing=10,
+                tight=True,
+            ),
+            bgcolor=GREEN,
+            foreground_color=ft.Colors.WHITE,
+            shape=ft.RoundedRectangleBorder(radius=30),
+            width=230,
+            height=56,
+            visible=False,
+            on_click=self.on_add_stock,
         )
         self.page.floating_action_button = self.reserve_button
         self.account_button = account_button
@@ -378,6 +404,10 @@ class CatalogView:
         self.is_owner = is_owner
         self.owner_add_button.visible = is_owner
         self.owner_add_pickup_spot_button.visible = is_owner
+        self.production_button.visible = is_owner
+        self.page.floating_action_button = (
+            self.production_button if is_owner else self.reserve_button
+        )
         if (
             not is_owner
             and self.pickup_spot_controller.selected_pickup_spot_id

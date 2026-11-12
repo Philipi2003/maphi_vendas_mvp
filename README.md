@@ -133,9 +133,12 @@ estas coleções e campos:
   `saleType`, `status`, `createdAt`. Leitura apenas pelo cliente proprietário
   ou pelo dono.
 
-Ao iniciar, o app carrega os `itemTypes` ativos do Firestore. Sabores cadastrados
-sem unidades físicas aparecem sem estoque; a leitura das unidades da coleção
-`items` será integrada na funcionalidade de estoque.
+Ao iniciar, o app carrega os `itemTypes` e conta os documentos de `items` com
+status `DISPONIVEL` para exibir o estoque de cada sabor. Donos podem registrar
+uma produção pelo FAB, selecionando um ou mais sabores e suas quantidades; cada
+bolo é salvo como um documento individual em `items`, em uma gravação atômica
+de até 500 unidades por inserção. As unidades novas começam com status
+`DISPONIVEL`.
 
 As regras identificam o dono por `users/{uid}.role == "DONO"`. O próprio usuário
 não pode criar ou editar esse campo: a conta de dono inicial deve receber o papel

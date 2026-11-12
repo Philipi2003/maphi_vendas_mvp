@@ -18,12 +18,15 @@ class FirebaseFirestoreClient:
         self.project_id = project_id or PROJECT_ID
         self.api_key = FIREBASE_API_KEY
 
-    def _documents_url(self) -> str:
+    def _documents_resource(self) -> str:
         if not self.project_id:
             raise FirebaseRestError("Configure PROJECT_ID para acessar o Firestore.")
+        return f"projects/{self.project_id}/databases/(default)/documents"
+
+    def _documents_url(self) -> str:
         return (
-            f"https://firestore.googleapis.com/v1/projects/{self.project_id}"
-            "/databases/(default)/documents"
+            "https://firestore.googleapis.com/v1/"
+            f"{self._documents_resource()}"
         )
 
     def _document_url(self, collection: str, document_id: str | None = None) -> str:
@@ -31,6 +34,9 @@ class FirebaseFirestoreClient:
         if document_id:
             path = f"{path}/{document_id}"
         return path
+
+    def _document_name(self, collection: str, document_id: str) -> str:
+        return f"{self._documents_resource()}/{collection}/{document_id}"
 
     async def get_document(
         self, collection: str, document_id: str, id_token: str
@@ -64,7 +70,7 @@ class FirebaseFirestoreClient:
         writes = [
             {
                 "update": {
-                    "name": self._document_url(collection, document_id),
+                    "name": self._document_name(collection, document_id),
                     "fields": fields,
                 },
                 "currentDocument": {"exists": False},

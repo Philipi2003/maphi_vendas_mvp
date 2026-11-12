@@ -5,6 +5,7 @@ from features.auth.auth_logic import AuthController
 from features.auth.auth_view import AuthView
 from features.catalog.catalog_logic import CatalogController
 from features.catalog.catalog_view import CatalogView
+from features.inventory.production_view import ProductionFormView
 from features.pickup_spots.pickup_spots_logic import (
     PickupSpot,
     PickupSpotController,
@@ -36,12 +37,19 @@ class MaphiApplication:
             on_notice=self.show_notice,
             on_message=self.show_message,
         )
+        self.production_form_view = ProductionFormView(
+            page=page,
+            on_submit=self.add_stock,
+            on_notice=self.show_notice,
+            on_message=self.show_message,
+        )
         self.catalog_view = CatalogView(
             page=page,
             controller=self.catalog_controller,
             pickup_spot_controller=self.pickup_spot_controller,
             account_button=self.auth_view.account_button,
             on_reserve=self.start_reservation,
+            on_add_stock=self.open_production_form,
             on_create_pickup_spot=self.open_pickup_spot_form,
             on_edit_pickup_spot=self.edit_pickup_spot,
             on_delete_pickup_spot=self.delete_pickup_spot,
@@ -315,6 +323,27 @@ class MaphiApplication:
 
     def start_reservation(self) -> None:
         self.show_message("Entre na sua conta para continuar com a reserva.")
+
+    async def open_production_form(self, _=None) -> None:
+        if not self.auth_controller.is_owner:
+            self.show_message("Apenas o dono pode registrar a produção.")
+            return
+        self.production_form_view.open_form(self.catalog_controller.cakes)
+
+    async def add_stock(self, quantities: dict[str, int]) -> int:
+        if (
+            not self.auth_controller.is_owner
+            or not self.auth_controller.id_token
+        ):
+            raise ValueError(
+                "Apenas uma conta de dono autenticada pode registrar a produção."
+            )
+        total_units = await self.catalog_controller.add_stock(
+            quantities, self.auth_controller.id_token
+        )
+        self.catalog_view.refresh()
+        self.page.update()
+        return total_units
 
 
 def create_application(page: ft.Page) -> MaphiApplication:

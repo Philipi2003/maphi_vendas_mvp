@@ -16,6 +16,7 @@ from features.catalog.catalog_logic import (
     ItemTypeImageCleanupError,
 )
 from features.catalog.catalog_view import CatalogView
+from features.inventory.production_view import ProductionFormView
 from features.pickup_spots.pickup_spots_logic import (
     PickupSpot,
     PickupSpotController,
@@ -517,6 +518,65 @@ async def test_inventory_check_queries_item_type_with_owner_token():
 
 
 @pytest.mark.asyncio
+async def test_available_item_query_filters_for_in_stock_status():
+    client = FirebaseFirestoreClient(project_id="maphi-project")
+    client._request = AsyncMock(return_value=[])
+
+    await client.list_available_items()
+
+    query = client._request.await_args.kwargs["payload"]["structuredQuery"]
+    assert query["from"] == [{"collectionId": "items"}]
+    assert query["where"]["fieldFilter"] == {
+        "field": {"fieldPath": "status"},
+        "op": "EQUAL",
+        "value": {"stringValue": "DISPONIVEL"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_firestore_creates_inventory_documents_atomically():
+    client = FirebaseFirestoreClient(project_id="maphi-project")
+    client._request = AsyncMock(return_value={})
+
+    await client.create_documents_atomically(
+        "items",
+        [
+            (
+                "unit-1",
+                {
+                    "itemTypeId": {"stringValue": "chocolate"},
+                    "status": {"stringValue": "DISPONIVEL"},
+                },
+            ),
+            (
+                "unit-2",
+                {
+                    "itemTypeId": {"stringValue": "morango"},
+                    "status": {"stringValue": "DISPONIVEL"},
+                },
+            ),
+        ],
+        "owner-token",
+    )
+
+    request_url = client._request.await_args.args[0]
+    request_options = client._request.await_args.kwargs
+    assert request_url.endswith("/documents:commit")
+    assert request_options["id_token"] == "owner-token"
+    writes = request_options["payload"]["writes"]
+    assert len(writes) == 2
+    assert writes[0]["update"]["name"] == (
+        "projects/maphi-project/databases/(default)/documents/items/unit-1"
+    )
+    assert writes[1]["update"]["fields"]["itemTypeId"] == {
+        "stringValue": "morango"
+    }
+    assert all(
+        write["currentDocument"] == {"exists": False} for write in writes
+    )
+
+
+@pytest.mark.asyncio
 async def test_active_pickup_spot_query_only_returns_active_locations():
     client = FirebaseFirestoreClient(project_id="maphi-project")
     client._request = AsyncMock(return_value=[])
@@ -685,6 +745,7 @@ def test_catalog_view_builds_pickup_selector_with_owner_actions():
         pickup_spot_controller=pickup_controller,
         account_button=ft.Text("Conta"),
         on_reserve=Mock(),
+        on_add_stock=AsyncMock(),
         on_create_pickup_spot=AsyncMock(),
         on_edit_pickup_spot=AsyncMock(),
         on_delete_pickup_spot=AsyncMock(),
@@ -697,6 +758,8 @@ def test_catalog_view_builds_pickup_selector_with_owner_actions():
     )
 
     view.set_owner(True)
+    assert view.production_button.visible is True
+    assert page.floating_action_button is view.production_button
     assert view.pickup_spot_edit_button.visible is True
     assert view.pickup_spot_edit_button.disabled is True
     assert view.pickup_spot_delete_button.visible is True
@@ -711,6 +774,10 @@ def test_catalog_view_builds_pickup_selector_with_owner_actions():
     assert view.pickup_spot_edit_button.disabled is False
     assert view.pickup_spot_delete_button.visible is True
     assert view.pickup_spot_delete_button.disabled is False
+
+    view.set_owner(False)
+    assert view.production_button.visible is False
+    assert page.floating_action_button is view.reserve_button
 
 
 def test_pickup_spot_availability_requires_fifteen_minutes_before_closing():
@@ -1070,6 +1137,34 @@ async def test_pickup_spot_update_and_delete_preserve_selection_state():
 async def test_catalog_loads_saved_firestore_item_types():
     controller = CatalogController()
     assert controller.cakes == []
+    controller.firestore_client.list_available_items = AsyncMock(
+        return_value=[
+            {
+                "document": {
+                    "fields": {
+                        "itemTypeId": {"stringValue": "chocolate"},
+                        "status": {"stringValue": "DISPONIVEL"},
+                    }
+                }
+            },
+            {
+                "document": {
+                    "fields": {
+                        "itemTypeId": {"stringValue": "chocolate"},
+                        "status": {"stringValue": "DISPONIVEL"},
+                    }
+                }
+            },
+            {
+                "document": {
+                    "fields": {
+                        "itemTypeId": {"stringValue": "chocolate"},
+                        "status": {"stringValue": "RESERVADO"},
+                    }
+                }
+            },
+        ]
+    )
 
     controller.firestore_client.list_active_item_types = AsyncMock(
         return_value=[
@@ -1098,13 +1193,128 @@ async def test_catalog_loads_saved_firestore_item_types():
     assert controller.cakes[0].image_url == "https://example.com/bolo.png"
     assert controller.cakes[0].regular_price == 45.0
     assert controller.cakes[0].promotional_price == 39.9
-    assert controller.cakes[0].stock == 0
+    assert controller.cakes[0].stock == 2
 
     controller.firestore_client.list_active_item_types = AsyncMock(return_value=[])
+    controller.firestore_client.list_available_items.return_value = []
     await controller.load_item_types()
 
     assert controller.cakes == []
     assert controller.quantities == {}
+
+
+@pytest.mark.asyncio
+async def test_production_adds_multiple_units_across_flavors_atomically():
+    chocolate = Cake(
+        "chocolate", "Chocolate", "Bolo de chocolate", 3, "#F0E2D6"
+    )
+    strawberry = Cake(
+        "strawberry", "Morango", "Bolo de morango", 1, "#F3E4E6"
+    )
+    controller = CatalogController(cakes=[chocolate, strawberry])
+    controller.firestore_client.create_documents_atomically = AsyncMock(
+        return_value={}
+    )
+
+    total = await controller.add_stock(
+        {"chocolate": 2, "strawberry": 3},
+        "owner-token",
+    )
+
+    assert total == 5
+    assert {cake.id: cake.stock for cake in controller.cakes} == {
+        "chocolate": 5,
+        "strawberry": 4,
+    }
+    collection, documents, token = (
+        controller.firestore_client.create_documents_atomically.await_args.args
+    )
+    assert collection == "items"
+    assert token == "owner-token"
+    assert len(documents) == 5
+    assert [
+        fields["itemTypeId"]["stringValue"] for _, fields in documents
+    ].count("chocolate") == 2
+    assert [
+        fields["itemTypeId"]["stringValue"] for _, fields in documents
+    ].count("strawberry") == 3
+    assert all(
+        fields["status"] == {"stringValue": "DISPONIVEL"}
+        and "timestampValue" in fields["createdAt"]
+        for _, fields in documents
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("quantities", "message"),
+    [
+        ({"chocolate": 0}, "inteiro positivo"),
+        ({"chocolate": -1}, "inteiro positivo"),
+        ({"chocolate": 501}, "no máximo 500"),
+        ({"missing": 1}, "não existe mais"),
+    ],
+)
+async def test_production_rejects_invalid_additions(quantities, message):
+    controller = CatalogController(
+        cakes=[Cake("chocolate", "Chocolate", "Bolo", 0, "#F0E2D6")]
+    )
+    controller.firestore_client.create_documents_atomically = AsyncMock()
+
+    with pytest.raises(ValueError, match=message):
+        await controller.add_stock(quantities, "owner-token")
+
+    controller.firestore_client.create_documents_atomically.assert_not_awaited()
+    assert controller.cakes[0].stock == 0
+
+
+@pytest.mark.asyncio
+async def test_production_keeps_local_stock_when_firestore_batch_fails():
+    controller = CatalogController(
+        cakes=[Cake("chocolate", "Chocolate", "Bolo", 4, "#F0E2D6")]
+    )
+    controller.firestore_client.create_documents_atomically = AsyncMock(
+        side_effect=FirebaseRestError("Firestore indisponível", 503)
+    )
+
+    with pytest.raises(FirebaseRestError, match="Firestore indisponível"):
+        await controller.add_stock({"chocolate": 2}, "owner-token")
+
+    assert controller.cakes[0].stock == 4
+
+
+@pytest.mark.asyncio
+async def test_production_form_submits_multiple_flavors_and_quantities():
+    page = SimpleNamespace(
+        show_dialog=Mock(),
+        update=Mock(),
+        pop_dialog=Mock(),
+    )
+    on_submit = AsyncMock(return_value=5)
+    on_notice = Mock()
+    view = ProductionFormView(
+        page,
+        on_submit=on_submit,
+        on_notice=on_notice,
+        on_message=Mock(),
+    )
+    view.open_form(
+        [
+            Cake("chocolate", "Chocolate", "Bolo", 0, "#F0E2D6"),
+            Cake("strawberry", "Morango", "Bolo", 0, "#F3E4E6"),
+        ]
+    )
+    view.entries[0].item_type.value = "chocolate"
+    view.entries[0].quantity.value = "2"
+    view._add_entry()
+    view.entries[1].item_type.value = "strawberry"
+    view.entries[1].quantity.value = "3"
+
+    await view._submit()
+
+    on_submit.assert_awaited_once_with({"chocolate": 2, "strawberry": 3})
+    on_notice.assert_called_once_with("5 bolos adicionados ao estoque.")
+    assert view.dialog is None
 
 
 @pytest.mark.asyncio
@@ -1123,6 +1333,9 @@ async def test_owner_catalog_includes_inactive_types_and_public_catalog_hides_th
         return_value=[inactive_document]
     )
     controller.firestore_client.list_active_item_types = AsyncMock(
+        return_value=[]
+    )
+    controller.firestore_client.list_available_items = AsyncMock(
         return_value=[]
     )
 
