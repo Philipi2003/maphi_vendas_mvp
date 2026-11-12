@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import re
 import uuid
@@ -58,8 +58,13 @@ class PickupSpotController:
             > current_time + MINIMUM_PICKUP_WINDOW
         )
 
-    async def load_active_pickup_spots(self) -> None:
-        rows = await self.firestore_client.list_active_pickup_spots()
+    async def load_active_pickup_spots(
+        self, id_token: str | None = None
+    ) -> None:
+        rows = await self.firestore_client.list_pickup_spots(
+            include_inactive=bool(id_token),
+            id_token=id_token,
+        )
         pickup_spots = []
         seen_ids = set()
         for row in rows:
@@ -83,6 +88,9 @@ class PickupSpotController:
                     ),
                     departure_at=self._decode_timestamp(
                         fields.get("departureAt", {}).get("timestampValue")
+                    ),
+                    is_active=fields.get("isActive", {}).get(
+                        "booleanValue", True
                     ),
                 )
             )
@@ -159,12 +167,15 @@ class PickupSpotController:
         )
         if existing is None:
             raise ValueError("O local de retirada não foi encontrado.")
-        updated = self._build_pickup_spot(
-            id=pickup_spot_id,
-            name=name,
-            address=address,
-            arrival_at=arrival_at,
-            departure_at=departure_at,
+        updated = replace(
+            self._build_pickup_spot(
+                id=pickup_spot_id,
+                name=name,
+                address=address,
+                arrival_at=arrival_at,
+                departure_at=departure_at,
+            ),
+            is_active=existing.is_active,
         )
         if not id_token:
             raise ValueError("Entre com uma conta de dono para editar o local.")
@@ -206,6 +217,30 @@ class PickupSpotController:
         self.pickup_spots.remove(existing)
         if self.selected_pickup_spot_id == pickup_spot_id:
             self.selected_pickup_spot_id = None
+
+    async def deactivate_pickup_spot(
+        self, pickup_spot_id: str, id_token: str
+    ) -> None:
+        if not id_token:
+            raise ValueError("Entre com uma conta de dono para remover o local.")
+        existing = next(
+            (spot for spot in self.pickup_spots if spot.id == pickup_spot_id),
+            None,
+        )
+        if existing is None:
+            raise ValueError("O local de retirada não foi encontrado.")
+        if not existing.is_active:
+            return
+        await self.firestore_client.update_document(
+            "pickupSpots",
+            pickup_spot_id,
+            {"isActive": {"booleanValue": False}},
+            ["isActive"],
+            id_token,
+        )
+        self.pickup_spots[self.pickup_spots.index(existing)] = replace(
+            existing, is_active=False
+        )
 
     @staticmethod
     def _build_pickup_spot(

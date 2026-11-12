@@ -1,7 +1,8 @@
 import asyncio
 import inspect
 import json
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta, timezone
+from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 from zoneinfo import ZoneInfo
@@ -26,6 +27,10 @@ from features.pickup_spots.pickup_spots_logic import (
     PickupSpotController,
 )
 from features.pickup_spots.pickup_spots_view import PickupSpotFormView
+from features.reservations.reservation_logic import (
+    ReservationController,
+    ReservationError,
+)
 from firebase_rest import (
     FirebaseFirestoreClient,
     FirebaseRestError,
@@ -169,6 +174,7 @@ async def test_application_restores_session_before_loading_catalog():
             side_effect=lambda: events.append("restore") or True
         ),
         is_owner=True,
+        is_authenticated=True,
     )
     app.auth_view = SimpleNamespace(
         refresh_account_button=Mock(
@@ -177,7 +183,9 @@ async def test_application_restores_session_before_loading_catalog():
     )
     app.catalog_controller = SimpleNamespace(hide_inactive_item_types=Mock())
     app.catalog_view = SimpleNamespace(
-        set_owner=Mock(side_effect=lambda _: events.append("owner"))
+        set_account_state=Mock(
+            side_effect=lambda **_: events.append("account-state")
+        )
     )
     app.load_database_item_types = AsyncMock(
         side_effect=lambda: events.append("items")
@@ -191,10 +199,18 @@ async def test_application_restores_session_before_loading_catalog():
 
     app.auth_controller.restore_session.assert_awaited_once()
     app.auth_view.refresh_account_button.assert_called_once()
-    app.catalog_view.set_owner.assert_called_once_with(True)
+    app.catalog_view.set_account_state.assert_called_once_with(
+        is_authenticated=True, is_owner=True
+    )
     app.load_database_item_types.assert_awaited_once()
     app.load_database_pickup_spots.assert_awaited_once()
-    assert events == ["restore", "account", "owner", "items", "pickups"]
+    assert events == [
+        "restore",
+        "account-state",
+        "account",
+        "items",
+        "pickups",
+    ]
 
 
 @pytest.mark.asyncio
@@ -926,7 +942,7 @@ async def test_active_pickup_spot_query_only_returns_active_locations():
 @pytest.mark.asyncio
 async def test_pickup_spots_load_and_selected_location_state():
     controller = PickupSpotController()
-    controller.firestore_client.list_active_pickup_spots = AsyncMock(
+    controller.firestore_client.list_pickup_spots = AsyncMock(
         return_value=[
             {
                 "document": {
@@ -947,6 +963,9 @@ async def test_pickup_spots_load_and_selected_location_state():
     )
 
     await controller.load_active_pickup_spots()
+    controller.firestore_client.list_pickup_spots.assert_awaited_once_with(
+        include_inactive=False, id_token=None
+    )
     controller.select_pickup_spot("centro")
 
     assert controller.selected_pickup_spot_id == "centro"
@@ -962,7 +981,7 @@ async def test_pickup_spots_load_and_selected_location_state():
         ),
     )
 
-    controller.firestore_client.list_active_pickup_spots.return_value = []
+    controller.firestore_client.list_pickup_spots.return_value = []
     await controller.load_active_pickup_spots()
 
     assert controller.pickup_spots == []
@@ -991,6 +1010,8 @@ def test_catalog_displays_pickup_location_and_schedule():
     view.pickup_spot_details = SimpleNamespace()
     view.pickup_spot_edit_button = SimpleNamespace()
     view.pickup_spot_delete_button = SimpleNamespace()
+    view.reserve_button = SimpleNamespace()
+    view.owner_reserve_button = SimpleNamespace()
 
     view.refresh_pickup_spot_options()
 
@@ -1026,6 +1047,8 @@ def test_obsolete_pickup_spots_are_hidden_from_customers_but_manageable_by_owner
     view.pickup_spot_details = SimpleNamespace()
     view.pickup_spot_edit_button = SimpleNamespace()
     view.pickup_spot_delete_button = SimpleNamespace()
+    view.reserve_button = SimpleNamespace()
+    view.owner_reserve_button = SimpleNamespace()
 
     view.refresh_pickup_spot_options()
 
@@ -1043,7 +1066,8 @@ def test_obsolete_pickup_spots_are_hidden_from_customers_but_manageable_by_owner
     assert view.pickup_spot_delete_button.visible is True
 
 
-def test_catalog_view_builds_pickup_selector_with_owner_actions():
+@pytest.mark.asyncio
+async def test_catalog_view_builds_pickup_selector_with_owner_actions():
     pickup_controller = PickupSpotController()
     pickup_controller.pickup_spots = [
         PickupSpot(
@@ -1068,7 +1092,7 @@ def test_catalog_view_builds_pickup_selector_with_owner_actions():
         controller=CatalogController(),
         pickup_spot_controller=pickup_controller,
         account_button=ft.Text("Conta"),
-        on_reserve=Mock(),
+        on_reserve=AsyncMock(),
         on_add_stock=AsyncMock(),
         on_create_pickup_spot=AsyncMock(),
         on_edit_pickup_spot=AsyncMock(),
@@ -1102,6 +1126,10 @@ def test_catalog_view_builds_pickup_selector_with_owner_actions():
     view.set_owner(False)
     assert view.production_button.visible is False
     assert page.floating_action_button is view.reserve_button
+
+    await view.reserve_button.on_click(None)
+    await view.owner_reserve_button.on_click(None)
+    assert view.on_reserve.await_count == 2
 
 
 def test_pickup_spot_availability_requires_fifteen_minutes_before_closing():
@@ -1458,6 +1486,38 @@ async def test_pickup_spot_update_and_delete_preserve_selection_state():
 
 
 @pytest.mark.asyncio
+async def test_editing_inactive_pickup_spot_does_not_reactivate_it():
+    pickup_spot = PickupSpot(
+        id="centro",
+        name="Loja do Centro",
+        address="Rua A, 123",
+        arrival_at=datetime(
+            2099, 12, 1, 10, 0, tzinfo=ZoneInfo("America/Sao_Paulo")
+        ),
+        departure_at=datetime(
+            2099, 12, 1, 18, 0, tzinfo=ZoneInfo("America/Sao_Paulo")
+        ),
+        is_active=False,
+    )
+    controller = PickupSpotController()
+    controller.pickup_spots = [pickup_spot]
+    controller.firestore_client.update_document = AsyncMock(return_value={})
+
+    updated = await controller.update_pickup_spot(
+        pickup_spot_id="centro",
+        name="Loja Central",
+        address="Rua B, 456",
+        arrival_at="02/12/2099 11:00",
+        departure_at="02/12/2099 19:00",
+        id_token="owner-token",
+    )
+
+    assert updated.is_active is False
+    fields = controller.firestore_client.update_document.await_args.args[2]
+    assert fields["isActive"] == {"booleanValue": False}
+
+
+@pytest.mark.asyncio
 async def test_catalog_loads_saved_firestore_item_types():
     controller = CatalogController()
     assert controller.cakes == []
@@ -1711,6 +1771,7 @@ async def test_edit_button_opens_edit_form():
     view.controller = SimpleNamespace(quantities={"chocolate": 0})
     view.on_check_item_type_inventory = AsyncMock(return_value=True)
     view.on_message = lambda _: None
+    view.on_remove_stock = None
     view.page = SimpleNamespace(show_dialog=shown_dialogs.append, update=Mock())
     cake = Cake("chocolate", "Chocolate", "Bolo", 0, "#F0E2D6")
 
@@ -1734,6 +1795,7 @@ async def test_edit_button_opens_form_if_inventory_check_fails():
         side_effect=FirebaseRestError("Firestore indisponível", 503)
     )
     view.on_message = Mock()
+    view.on_remove_stock = None
     view.page = SimpleNamespace(show_dialog=shown_dialogs.append, update=Mock())
     cake = Cake("chocolate", "Chocolate", "Bolo", 0, "#F0E2D6")
 
@@ -1958,3 +2020,412 @@ def test_reopening_auth_view_after_registration_starts_at_login():
 
     assert controller.is_registration is False
     assert len(dialogs) == 1
+
+
+def _reservation_controller_with_available_item():
+    controller = ReservationController()
+    client = controller.firestore_client
+    pickup_path = client._document_name("pickupSpots", "centro")
+    item_type_path = client._document_name("itemTypes", "chocolate")
+    now = datetime.now(timezone.utc)
+    pickup_document = {
+        "name": pickup_path,
+        "fields": {
+            "isActive": {"booleanValue": True},
+            "name": {"stringValue": "Loja do Centro"},
+            "address": {"stringValue": "Rua A, 123"},
+            "arrivalAt": {
+                "timestampValue": (now + timedelta(hours=1))
+                .isoformat()
+                .replace("+00:00", "Z")
+            },
+            "departureAt": {
+                "timestampValue": (now + timedelta(hours=3))
+                .isoformat()
+                .replace("+00:00", "Z")
+            },
+        },
+    }
+    item_type_document = {
+        "name": item_type_path,
+        "fields": {
+            "name": {"stringValue": "Chocolate"},
+            "isActive": {"booleanValue": True},
+            "regularPrice": {"doubleValue": 20.0},
+            "promotionalPrice": {"doubleValue": 15.0},
+        },
+    }
+    available_item = {
+        "name": client._document_name("items", "unit-1"),
+        "fields": {
+            "itemTypeId": {"stringValue": "chocolate"},
+            "itemTypeName": {"stringValue": "Chocolate"},
+            "status": {"stringValue": "DISPONIVEL"},
+        },
+    }
+
+    async def batch_get(document_names, *_):
+        documents = (
+            [pickup_document]
+            if document_names == [pickup_path]
+            else [item_type_document]
+        )
+        return [{"found": document} for document in documents]
+
+    client.begin_transaction = AsyncMock(return_value="transaction")
+    client.batch_get_in_transaction = AsyncMock(side_effect=batch_get)
+    client.run_query_in_transaction = AsyncMock(
+        return_value=[{"document": available_item}]
+    )
+    client.commit_transaction = AsyncMock(return_value={})
+    client.rollback_transaction = AsyncMock()
+    return controller, client
+
+
+@pytest.mark.asyncio
+async def test_customer_reservation_atomically_allocates_stock_and_snapshots_price():
+    controller, client = _reservation_controller_with_available_item()
+
+    reservation = await controller.create_reservation(
+        quantities={"chocolate": 1},
+        pickup_spot_id="centro",
+        user_id="customer-1",
+        user_name="Maria",
+        is_owner=False,
+        id_token="customer-token",
+    )
+
+    writes = client.commit_transaction.await_args.args[0]
+    assert reservation.total_amount == Decimal("15.00")
+    assert reservation.item_ids == ("unit-1",)
+    assert reservation.status == "ATIVA"
+    assert len(writes) == 2
+    assert writes[0]["update"]["fields"]["status"] == {
+        "stringValue": "RESERVADO"
+    }
+    reservation_fields = writes[1]["update"]["fields"]
+    assert reservation_fields["saleType"] == {"stringValue": "PROMOCAO"}
+    assert reservation_fields["userId"] == {"stringValue": "customer-1"}
+    assert reservation_fields["totalAmount"] == {"doubleValue": 15.0}
+    client.run_query_in_transaction.assert_awaited_once()
+    query = client.run_query_in_transaction.await_args.args[0]
+    assert query["from"] == [{"collectionId": "items"}]
+    assert query["limit"] == 1
+    assert {
+        condition["fieldFilter"]["field"]["fieldPath"]
+        for condition in query["where"]["compositeFilter"]["filters"]
+    } == {"itemTypeId", "status"}
+
+
+@pytest.mark.asyncio
+async def test_owner_reservation_uses_regular_price_for_in_person_sale():
+    controller, client = _reservation_controller_with_available_item()
+
+    reservation = await controller.create_reservation(
+        quantities={"chocolate": 1},
+        pickup_spot_id="centro",
+        user_id="owner-1",
+        user_name="Dona",
+        is_owner=True,
+        id_token="owner-token",
+    )
+
+    assert reservation.total_amount == Decimal("20.00")
+    assert reservation.sale_type == "NORMAL"
+    item_write = client.commit_transaction.await_args.args[0][0]
+    assert item_write["update"]["fields"]["reservedPrice"] == {
+        "doubleValue": 20.0
+    }
+
+
+@pytest.mark.asyncio
+async def test_reservation_rejects_insufficient_stock_without_committing():
+    controller, client = _reservation_controller_with_available_item()
+    client.run_query_in_transaction.return_value = []
+
+    with pytest.raises(ReservationError, match="O estoque mudou"):
+        await controller.create_reservation(
+            quantities={"chocolate": 1},
+            pickup_spot_id="centro",
+            user_id="customer-1",
+            user_name="Maria",
+            is_owner=False,
+            id_token="customer-token",
+        )
+
+    client.commit_transaction.assert_not_awaited()
+    client.rollback_transaction.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_reservation_retries_transaction_conflicts():
+    controller, client = _reservation_controller_with_available_item()
+    client.begin_transaction = AsyncMock(
+        side_effect=["transaction-1", "transaction-2"]
+    )
+    client.commit_transaction = AsyncMock(
+        side_effect=[FirebaseRestError("ABORTED", 409), {}]
+    )
+
+    await controller.create_reservation(
+        quantities={"chocolate": 1},
+        pickup_spot_id="centro",
+        user_id="customer-1",
+        user_name="Maria",
+        is_owner=False,
+        id_token="customer-token",
+    )
+
+    assert client.begin_transaction.await_count == 2
+    assert client.commit_transaction.await_count == 2
+    client.rollback_transaction.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_owner_cancellation_releases_stock_and_records_cancellation_origin():
+    controller = ReservationController()
+    client = controller.firestore_client
+    reservation_path = client._document_name("reservations", "reservation-1")
+    item_path = client._document_name("items", "unit-1")
+    reservation_document = {
+        "name": reservation_path,
+        "fields": {
+            "status": {"stringValue": "ATIVA"},
+            "userId": {"stringValue": "customer-1"},
+            "itemIds": {
+                "arrayValue": {
+                    "values": [{"stringValue": "unit-1"}]
+                }
+            },
+        },
+    }
+    item_document = {
+        "name": item_path,
+        "fields": {
+            "status": {"stringValue": "RESERVADO"},
+            "reservationId": {"stringValue": "reservation-1"},
+        },
+    }
+
+    async def batch_get(document_names, *_):
+        document = (
+            reservation_document
+            if document_names == [reservation_path]
+            else item_document
+        )
+        return [{"found": document}]
+
+    client.begin_transaction = AsyncMock(return_value="transaction")
+    client.batch_get_in_transaction = AsyncMock(side_effect=batch_get)
+    client.commit_transaction = AsyncMock(return_value={})
+    client.rollback_transaction = AsyncMock()
+
+    await controller.cancel_reservation(
+        "reservation-1",
+        user_id="owner-1",
+        id_token="owner-token",
+        is_owner=True,
+    )
+
+    item_write, reservation_write = client.commit_transaction.await_args.args[0]
+    assert item_write["update"]["fields"]["status"] == {
+        "stringValue": "DISPONIVEL"
+    }
+    assert item_write["updateMask"]["fieldPaths"] == [
+        "status",
+        "reservationId",
+        "reservedPrice",
+    ]
+    assert reservation_write["update"]["fields"]["cancelledBy"] == {
+        "stringValue": "DONO"
+    }
+    assert reservation_write["update"]["fields"]["status"] == {
+        "stringValue": "CANCELADA"
+    }
+
+
+@pytest.mark.asyncio
+async def test_deleting_pickup_spot_cancels_reservations_before_deleting_spot():
+    events = []
+
+    def record_cancellation(pickup_spot_id, *, owner_id, id_token):
+        assert pickup_spot_id == "spot-1"
+        assert owner_id == "owner-1"
+        assert id_token == "owner-token"
+        events.append("cancel")
+
+    app = object.__new__(MaphiApplication)
+    app.auth_controller = SimpleNamespace(
+        is_owner=True,
+        id_token="owner-token",
+        user_id="owner-1",
+    )
+    app.pickup_spot_controller = SimpleNamespace(
+        deactivate_pickup_spot=AsyncMock(
+            side_effect=lambda *_: events.append("deactivate")
+        ),
+        delete_pickup_spot=AsyncMock(
+            side_effect=lambda *_: events.append("delete")
+        ),
+    )
+    app.reservation_controller = SimpleNamespace(
+        cancel_active_for_pickup=AsyncMock(
+            side_effect=record_cancellation
+        )
+    )
+    app.catalog_view = SimpleNamespace(
+        refresh_pickup_spot_options=Mock(
+            side_effect=lambda: events.append("refresh")
+        )
+    )
+    app.page = SimpleNamespace(update=lambda: events.append("update"))
+    app.load_database_item_types = AsyncMock(
+        side_effect=lambda: events.append("items")
+    )
+
+    await app.delete_pickup_spot("spot-1")
+
+    assert events == [
+        "deactivate",
+        "refresh",
+        "update",
+        "cancel",
+        "delete",
+        "refresh",
+        "update",
+        "items",
+    ]
+    app.reservation_controller.cancel_active_for_pickup.assert_awaited_once_with(
+        "spot-1",
+        owner_id="owner-1",
+        id_token="owner-token",
+    )
+
+
+@pytest.mark.asyncio
+async def test_pickup_spot_is_not_deleted_when_reservation_cancellation_fails():
+    app = object.__new__(MaphiApplication)
+    app.auth_controller = SimpleNamespace(
+        is_owner=True,
+        id_token="owner-token",
+        user_id="owner-1",
+    )
+    app.pickup_spot_controller = SimpleNamespace(
+        deactivate_pickup_spot=AsyncMock(),
+        delete_pickup_spot=AsyncMock(),
+    )
+    app.catalog_view = SimpleNamespace(
+        refresh_pickup_spot_options=Mock()
+    )
+    app.page = SimpleNamespace(update=Mock())
+    app.reservation_controller = SimpleNamespace(
+        cancel_active_for_pickup=AsyncMock(
+            side_effect=FirebaseRestError("Firestore indisponível", 503)
+        )
+    )
+
+    with pytest.raises(FirebaseRestError, match="Firestore indisponível"):
+        await app.delete_pickup_spot("spot-1")
+
+    app.pickup_spot_controller.deactivate_pickup_spot.assert_awaited_once()
+    app.pickup_spot_controller.delete_pickup_spot.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reserving_more_than_two_selected_units_creates_multiple_reservations():
+    app = object.__new__(MaphiApplication)
+    app.auth_controller = SimpleNamespace(
+        is_authenticated=True,
+        is_owner=False,
+        id_token="customer-token",
+        user_id="customer-1",
+        user_name="Maria",
+    )
+    app.pickup_spot_controller = SimpleNamespace(
+        selected_pickup_spot=SimpleNamespace(id="centro")
+    )
+    app.catalog_controller = SimpleNamespace(
+        quantities={"chocolate": 2, "morango": 1},
+        cakes=[SimpleNamespace(id="chocolate"), SimpleNamespace(id="morango")],
+    )
+    app.catalog_view = SimpleNamespace(
+        reserve_button=SimpleNamespace(disabled=False),
+        owner_reserve_button=SimpleNamespace(disabled=False),
+        refresh=Mock(),
+    )
+    app.page = SimpleNamespace(update=Mock())
+    app.is_creating_reservation = False
+    app.reservation_controller = SimpleNamespace(
+        create_reservation=AsyncMock(
+            side_effect=[
+                SimpleNamespace(total_amount=Decimal("30.00")),
+                SimpleNamespace(total_amount=Decimal("15.00")),
+            ]
+        )
+    )
+    app.load_database_item_types = AsyncMock()
+    app.show_notice = Mock()
+    app.show_message = Mock()
+    app.open_reservations = AsyncMock()
+
+    await app.start_reservation()
+
+    calls = app.reservation_controller.create_reservation.await_args_list
+    assert [call.kwargs["quantities"] for call in calls] == [
+        {"chocolate": 2},
+        {"morango": 1},
+    ]
+    assert app.catalog_controller.quantities == {
+        "chocolate": 0,
+        "morango": 0,
+    }
+    app.show_notice.assert_called_once_with(
+        "2 reservas criadas. Valor a pagar: R$ 45,00"
+    )
+    app.open_reservations.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_owner_removes_only_one_available_inventory_unit():
+    cake = Cake("chocolate", "Chocolate", "Bolo", 2, "#F0E2D6")
+    controller = CatalogController([cake])
+    client = controller.firestore_client
+    available_item = {
+        "name": client._document_name("items", "unit-1"),
+        "fields": {
+            "itemTypeId": {"stringValue": "chocolate"},
+            "status": {"stringValue": "DISPONIVEL"},
+        },
+    }
+    client.begin_transaction = AsyncMock(return_value="transaction")
+    client.run_query_in_transaction = AsyncMock(
+        return_value=[{"document": available_item}]
+    )
+    client.commit_transaction = AsyncMock(return_value={})
+    client.rollback_transaction = AsyncMock()
+
+    await controller.remove_available_unit("chocolate", "owner-token")
+
+    writes = client.commit_transaction.await_args.args[0]
+    query = client.run_query_in_transaction.await_args.args[0]
+    assert writes == [{"delete": available_item["name"]}]
+    assert query["limit"] == 1
+    assert controller.cakes[0].stock == 1
+
+
+@pytest.mark.asyncio
+async def test_owner_cannot_remove_reserved_inventory_unit():
+    controller = CatalogController(
+        [Cake("chocolate", "Chocolate", "Bolo", 0, "#F0E2D6")]
+    )
+    client = controller.firestore_client
+    client.begin_transaction = AsyncMock(return_value="transaction")
+    client.run_query_in_transaction = AsyncMock(return_value=[])
+    client.commit_transaction = AsyncMock()
+    client.rollback_transaction = AsyncMock()
+
+    with pytest.raises(ValueError, match="Não há unidades não reservadas"):
+        await controller.remove_available_unit("chocolate", "owner-token")
+
+    client.commit_transaction.assert_not_awaited()
+    client.rollback_transaction.assert_awaited_once()

@@ -42,6 +42,8 @@ class CatalogView:
         on_check_item_type_inventory,
         on_notice,
         on_message,
+        on_reservations=None,
+        on_remove_stock=None,
     ):
         self.page = page
         self.controller = controller
@@ -57,7 +59,10 @@ class CatalogView:
         self.on_check_item_type_inventory = on_check_item_type_inventory
         self.on_notice = on_notice
         self.on_message = on_message
+        self.on_reservations = on_reservations or (lambda: None)
+        self.on_remove_stock = on_remove_stock
         self.is_owner = False
+        self.is_authenticated = False
         self.filter_controls: dict[str, ft.Container] = {}
         self.item_type_dialog: ft.AlertDialog | None = None
         self.editing_item_type: Cake | None = None
@@ -119,6 +124,18 @@ class CatalogView:
         self.selection_label = ft.Text(
             color=ACCENT, size=13, weight=ft.FontWeight.W_600, visible=False
         )
+        self.reservations_button = ft.OutlinedButton(
+            "Minhas reservas",
+            icon=ft.Icons.RECEIPT_LONG_OUTLINED,
+            visible=False,
+            on_click=self.on_reservations,
+        )
+        self.owner_reserve_button = ft.OutlinedButton(
+            "Reservar selecionados",
+            icon=ft.Icons.SHOPPING_BAG_OUTLINED,
+            visible=False,
+            on_click=self._reserve_selected,
+        )
         self.catalog_grid = ft.ResponsiveRow(columns=12, spacing=18, run_spacing=18)
         self.reserve_button = ft.FloatingActionButton(
             content=ft.Row(spacing=10, tight=True),
@@ -127,7 +144,7 @@ class CatalogView:
             shape=ft.RoundedRectangleBorder(radius=30),
             width=220,
             height=56,
-            on_click=lambda _: self.on_reserve(),
+            on_click=self._reserve_selected,
             visible=False,
         )
         self.production_button = ft.FloatingActionButton(
@@ -216,7 +233,12 @@ class CatalogView:
                         ],
                         spacing=10,
                     ),
-                    self.account_button,
+                    ft.Row(
+                        controls=[self.reservations_button, self.account_button],
+                        spacing=8,
+                        wrap=True,
+                        alignment=ft.MainAxisAlignment.END,
+                    ),
                 ],
                 alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -357,6 +379,7 @@ class CatalogView:
                     content=ft.Column(
                         controls=[
                             self.selection_label,
+                            self.owner_reserve_button,
                             self.owner_add_button,
                             self.owner_add_pickup_spot_button,
                         ],
@@ -402,6 +425,9 @@ class CatalogView:
             ),
         )
 
+    async def _reserve_selected(self, _) -> None:
+        await self.on_reserve()
+
     def set_owner(self, is_owner: bool) -> None:
         self.is_owner = is_owner
         self.owner_add_button.visible = is_owner
@@ -422,6 +448,16 @@ class CatalogView:
         self.refresh_pickup_spot_options()
         self.refresh()
         self.page.update()
+
+    def set_account_state(
+        self, *, is_authenticated: bool, is_owner: bool
+    ) -> None:
+        self.is_authenticated = is_authenticated
+        self.reservations_button.visible = is_authenticated
+        self.reservations_button.text = (
+            "Reservas" if is_owner else "Minhas reservas"
+        )
+        self.set_owner(is_owner)
 
     async def _open_pickup_spot_form(self, _=None) -> None:
         await self.on_create_pickup_spot()
@@ -463,6 +499,7 @@ class CatalogView:
         self.pickup_spot_delete_button.visible = self.is_owner
         self.pickup_spot_delete_button.disabled = not has_selected_spot
         self._refresh_pickup_spot_details()
+        self._update_reserve_button()
 
     def _pickup_spot_changed(self, event: ft.Event[ft.Dropdown]) -> None:
         try:
@@ -862,6 +899,9 @@ class CatalogView:
         async def edit_item_type() -> None:
             await self._open_item_type_form(item_type=cake)
 
+        async def remove_available_stock() -> None:
+            await self._ask_remove_stock(cake)
+
         return CatalogCardView(
             cake,
             quantity=self.controller.quantities[cake.id],
@@ -870,7 +910,46 @@ class CatalogView:
                 cake.id, amount
             ),
             on_edit=edit_item_type if self.is_owner else None,
+            on_remove_stock=(
+                remove_available_stock
+                if self.is_owner and self.on_remove_stock is not None
+                else None
+            ),
         ).build()
+
+    async def _ask_remove_stock(self, cake: Cake) -> None:
+        if not self.is_owner or self.on_remove_stock is None:
+            return
+
+        async def confirm(_=None) -> None:
+            try:
+                await self.on_remove_stock(cake.id)
+                self.page.pop_dialog()
+                self.refresh()
+                self.page.update()
+                self.on_notice("Uma unidade não reservada foi removida do estoque.")
+            except (FirebaseRestError, ValueError) as exc:
+                self.page.pop_dialog()
+                self.on_message(str(exc))
+
+        self.page.show_dialog(
+            ft.AlertDialog(
+                modal=True,
+                title=ft.Text("Remover uma unidade do estoque?"),
+                content=ft.Text(
+                    f"{cake.name}: {cake.stock} unidades não reservadas. "
+                    "Unidades vinculadas a reservas não podem ser removidas."
+                ),
+                actions=[
+                    ft.TextButton(
+                        "Cancelar",
+                        on_click=lambda _: self.page.pop_dialog(),
+                    ),
+                    ft.TextButton("Remover", on_click=confirm),
+                ],
+                actions_alignment=ft.MainAxisAlignment.END,
+            )
+        )
 
     def _change_cake_quantity(self, cake_id: str, amount: int) -> None:
         self.controller.change_quantity(cake_id, amount)
@@ -893,6 +972,7 @@ class CatalogView:
         )
         self.selection_label.visible = selected > 0
         self.reserve_button.visible = selected > 0
+        self.owner_reserve_button.visible = self.is_owner and selected > 0
         self.reserve_button.content = ft.Row(
             controls=[
                 ft.Icon(ft.Icons.SHOPPING_BAG_OUTLINED, color=ft.Colors.WHITE),
@@ -905,8 +985,23 @@ class CatalogView:
             spacing=10,
             tight=True,
         )
+        self._update_reserve_button()
         for label, control in self.filter_controls.items():
             is_selected = label == self.controller.active_filter
             control.bgcolor = ACCENT if is_selected else SURFACE
             control.content.color = ft.Colors.WHITE if is_selected else MUTED
             control.border = ft.Border.all(1, ACCENT if is_selected else BORDER)
+
+    def _update_reserve_button(self) -> None:
+        pickup_spot = self.pickup_spot_controller.selected_pickup_spot
+        self.reserve_button.disabled = (
+            pickup_spot is None
+            or not pickup_spot.is_active
+            or (
+                not self.is_owner
+                and not self.pickup_spot_controller.is_pickup_spot_available(
+                    pickup_spot
+                )
+            )
+        )
+        self.owner_reserve_button.disabled = self.reserve_button.disabled

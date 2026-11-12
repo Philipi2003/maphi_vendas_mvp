@@ -107,8 +107,12 @@ class CatalogController:
                 cakes.append(cake)
                 seen_ids.add(cake.id)
 
+        previous_quantities = self.quantities
         self.cakes = cakes
-        self.quantities = {cake.id: 0 for cake in cakes}
+        self.quantities = {
+            cake.id: min(previous_quantities.get(cake.id, 0), cake.stock)
+            for cake in cakes
+        }
 
     def hide_inactive_item_types(self) -> None:
         self.cakes = [cake for cake in self.cakes if cake.is_active]
@@ -193,6 +197,103 @@ class CatalogController:
             for cake in self.cakes
         ]
         return total_units
+
+    async def remove_available_unit(
+        self, item_type_id: str, id_token: str
+    ) -> None:
+        if not id_token:
+            raise ValueError("Entre com uma conta de dono para remover estoque.")
+        cake = next(
+            (cake for cake in self.cakes if cake.id == item_type_id), None
+        )
+        if cake is None:
+            raise ValueError("O sabor não foi encontrado no catálogo.")
+
+        transaction = await self.firestore_client.begin_transaction(id_token)
+        try:
+            rows = await self.firestore_client.run_query_in_transaction(
+                {
+                    "from": [{"collectionId": "items"}],
+                    "where": {
+                        "compositeFilter": {
+                            "op": "AND",
+                            "filters": [
+                                {
+                                    "fieldFilter": {
+                                        "field": {
+                                            "fieldPath": "itemTypeId"
+                                        },
+                                        "op": "EQUAL",
+                                        "value": {
+                                            "stringValue": item_type_id
+                                        },
+                                    }
+                                },
+                                {
+                                    "fieldFilter": {
+                                        "field": {"fieldPath": "status"},
+                                        "op": "EQUAL",
+                                        "value": {
+                                            "stringValue": "DISPONIVEL"
+                                        },
+                                    }
+                                },
+                            ],
+                        }
+                    },
+                    "limit": 1,
+                },
+                transaction,
+                id_token,
+            )
+            available = next(
+                (
+                    row["document"]
+                    for row in rows
+                    if row.get("document", {})
+                    .get("fields", {})
+                    .get("status", {})
+                    .get("stringValue")
+                    == "DISPONIVEL"
+                ),
+                None,
+            )
+            if available is None:
+                await self.firestore_client.rollback_transaction(
+                    transaction, id_token
+                )
+                raise ValueError(
+                    "Não há unidades não reservadas deste sabor para remover."
+                )
+
+            await self.firestore_client.commit_transaction(
+                [{"delete": available["name"]}],
+                transaction,
+                id_token,
+            )
+        except FirebaseRestError as exc:
+            if exc.status_code != 409:
+                try:
+                    await self.firestore_client.rollback_transaction(
+                        transaction, id_token
+                    )
+                except FirebaseRestError as rollback_error:
+                    raise FirebaseRestError(
+                        f"{exc}; não foi possível encerrar a transação: "
+                        f"{rollback_error}",
+                        rollback_error.status_code,
+                    ) from rollback_error
+            raise
+
+        self.cakes = [
+            replace(cake, stock=max(0, cake.stock - 1))
+            if cake.id == item_type_id
+            else cake
+            for cake in self.cakes
+        ]
+        self.quantities[item_type_id] = min(
+            self.quantities.get(item_type_id, 0), max(0, cake.stock - 1)
+        )
 
     async def create_item_type(
         self,

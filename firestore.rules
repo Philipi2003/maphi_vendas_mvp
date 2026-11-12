@@ -12,6 +12,260 @@ service cloud.firestore {
           .data.role == 'DONO';
     }
 
+    function itemPath(itemId) {
+      return /databases/$(database)/documents/items/$(itemId);
+    }
+
+    function itemTypePath(itemTypeId) {
+      return /databases/$(database)/documents/itemTypes/$(itemTypeId);
+    }
+
+    function reservationPath(reservationId) {
+      return /databases/$(database)/documents/reservations/$(reservationId);
+    }
+
+    function pickupSpotPath(pickupSpotId) {
+      return /databases/$(database)/documents/pickupSpots/$(pickupSpotId);
+    }
+
+    function linkedReservedItem(data, index, reservationId) {
+      let item = getAfter(itemPath(data.itemIds[index])).data;
+      return item.status == 'RESERVADO'
+        && item.reservationId == reservationId
+        && item.itemTypeId == data.itemTypeIds[index]
+        && item.itemTypeName == data.itemTypeNames[index]
+        && item.reservedPrice == data.unitPrices[index];
+    }
+
+    function reservationItemsAreLinked(data, reservationId) {
+      return data.itemIds is list
+        && data.itemTypeIds is list
+        && data.itemTypeNames is list
+        && data.unitPrices is list
+        && data.itemIds.size() >= 1
+        && data.itemIds.size() <= 2
+        && (
+          data.itemIds.size() == 1
+          || data.itemIds[0] != data.itemIds[1]
+        )
+        && data.itemTypeIds.size() == data.itemIds.size()
+        && data.itemTypeNames.size() == data.itemIds.size()
+        && data.unitPrices.size() == data.itemIds.size()
+        && linkedReservedItem(data, 0, reservationId)
+        && (
+          data.itemIds.size() == 1
+          || linkedReservedItem(data, 1, reservationId)
+        );
+    }
+
+    function reservationTotalIsValid(data) {
+      return data.unitPrices[0] is number
+        && data.unitPrices[0] > 0
+        && data.totalAmount is number
+        && (
+          (
+            data.itemIds.size() == 1
+            && data.totalAmount > data.unitPrices[0] - 0.001
+            && data.totalAmount < data.unitPrices[0] + 0.001
+          )
+          || (
+            data.itemIds.size() == 2
+            && data.unitPrices[1] is number
+            && data.unitPrices[1] > 0
+            && data.totalAmount
+              > data.unitPrices[0] + data.unitPrices[1] - 0.001
+            && data.totalAmount
+              < data.unitPrices[0] + data.unitPrices[1] + 0.001
+          )
+        );
+    }
+
+    function itemHasReservationState(data, index, reservationId, status) {
+      let item = getAfter(itemPath(data.itemIds[index])).data;
+      return get(itemPath(data.itemIds[index])).data.reservationId
+          == reservationId
+        && item.status == status
+        && !item.keys().hasAny(['reservationId'])
+        && !item.keys().hasAny(['reservedPrice']);
+    }
+
+    function reservationItemsHaveState(data, reservationId, status) {
+      return data.itemIds is list
+        && data.itemIds.size() >= 1
+        && data.itemIds.size() <= 2
+        && (
+          data.itemIds.size() == 1
+          || data.itemIds[0] != data.itemIds[1]
+        )
+        && itemHasReservationState(data, 0, reservationId, status)
+        && (
+          data.itemIds.size() == 1
+          || itemHasReservationState(data, 1, reservationId, status)
+        );
+    }
+
+    function pickupIsReservable(data) {
+      let pickup = get(pickupSpotPath(data.pickupSpotId)).data;
+      return pickup.isActive == true
+        && pickup.arrivalAt is timestamp
+        && pickup.departureAt is timestamp
+        && pickup.departureAt > pickup.arrivalAt
+        && pickup.departureAt
+          >= pickup.arrivalAt + duration.value(15, 'm')
+        && data.pickupSpotName == pickup.name
+        && data.pickupSpotAddress == pickup.address
+        && data.pickupArrivalAt == pickup.arrivalAt
+        && data.pickupDepartureAt == pickup.departureAt
+        && (
+          isOwner()
+          || pickup.departureAt > request.time + duration.value(15, 'm')
+        );
+    }
+
+    function reservationCreateIsValid(reservationId) {
+      let data = request.resource.data;
+      return signedIn()
+        && data.keys().hasAll([
+          'userId',
+          'userName',
+          'pickupSpotId',
+          'pickupSpotName',
+          'pickupSpotAddress',
+          'pickupArrivalAt',
+          'pickupDepartureAt',
+          'itemIds',
+          'itemTypeIds',
+          'itemTypeNames',
+          'unitPrices',
+          'totalAmount',
+          'saleType',
+          'status',
+          'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'userId',
+          'userName',
+          'pickupSpotId',
+          'pickupSpotName',
+          'pickupSpotAddress',
+          'pickupArrivalAt',
+          'pickupDepartureAt',
+          'itemIds',
+          'itemTypeIds',
+          'itemTypeNames',
+          'unitPrices',
+          'totalAmount',
+          'saleType',
+          'status',
+          'createdAt'
+        ])
+        && data.userId == request.auth.uid
+        && data.userName is string
+        && data.pickupSpotId is string
+        && data.status == 'ATIVA'
+        && data.createdAt is timestamp
+        && data.saleType == (isOwner() ? 'NORMAL' : 'PROMOCAO')
+        && pickupIsReservable(data)
+        && reservationItemsAreLinked(data, reservationId)
+        && reservationTotalIsValid(data);
+    }
+
+    function reservationCancelIsValid(reservationId) {
+      let data = request.resource.data;
+      return resource.data.status == 'ATIVA'
+        && data.status == 'CANCELADA'
+        && data.diff(resource.data).affectedKeys().hasOnly([
+          'status',
+          'cancelledBy',
+          'cancelledAt'
+        ])
+        && data.cancelledAt is timestamp
+        && (
+          (isOwner() && data.cancelledBy == 'DONO')
+          || (
+            !isOwner()
+            && resource.data.userId == request.auth.uid
+            && data.cancelledBy == 'CLIENTE'
+          )
+        )
+        && reservationItemsHaveState(resource.data, reservationId, 'DISPONIVEL');
+    }
+
+    function reservationSaleIsValid(reservationId) {
+      let data = request.resource.data;
+      return isOwner()
+        && resource.data.status == 'ATIVA'
+        && data.status == 'CONCLUIDA'
+        && data.diff(resource.data).affectedKeys().hasOnly([
+          'status',
+          'completedAt'
+        ])
+        && data.completedAt is timestamp
+        && reservationItemsHaveState(resource.data, reservationId, 'VENDIDO');
+    }
+
+    function itemReserveFor(itemId, reservationId) {
+      let reservation = getAfter(reservationPath(reservationId)).data;
+      let itemType = get(itemTypePath(resource.data.itemTypeId)).data;
+      let expectedPrice = reservation.saleType == 'PROMOCAO'
+        && itemType.keys().hasAny(['promotionalPrice'])
+          ? itemType.promotionalPrice
+          : itemType.regularPrice;
+      return resource.data.status == 'DISPONIVEL'
+        && request.resource.data.status == 'RESERVADO'
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'status',
+          'reservationId',
+          'reservedPrice'
+        ])
+        && reservation.status == 'ATIVA'
+        && (isOwner() || itemType.isActive == true)
+        && reservation.itemIds.hasAny([itemId])
+        && request.resource.data.reservationId is string
+        && request.resource.data.reservedPrice == expectedPrice;
+    }
+
+    function itemReleaseFor(reservationId) {
+      let reservation = getAfter(reservationPath(reservationId)).data;
+      return resource.data.status == 'RESERVADO'
+        && request.resource.data.status == 'DISPONIVEL'
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'status',
+          'reservationId',
+          'reservedPrice'
+        ])
+        && !request.resource.data.keys().hasAny([
+          'reservationId',
+          'reservedPrice'
+        ])
+        && reservation.status == 'CANCELADA'
+        && (
+          (isOwner() && reservation.cancelledBy == 'DONO')
+          || (
+            !isOwner()
+            && reservation.userId == request.auth.uid
+            && reservation.cancelledBy == 'CLIENTE'
+          )
+        );
+    }
+
+    function itemSaleFor(reservationId) {
+      let reservation = getAfter(reservationPath(reservationId)).data;
+      return isOwner()
+        && resource.data.status == 'RESERVADO'
+        && request.resource.data.status == 'VENDIDO'
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'status',
+          'reservationId',
+          'reservedPrice'
+        ])
+        && !request.resource.data.keys().hasAny([
+          'reservationId',
+          'reservedPrice'
+        ])
+        && reservation.status == 'CONCLUIDA';
+    }
+
     match /itemTypes/{itemTypeId} {
       allow read: if isOwner() || resource.data.isActive == true;
       allow create, update, delete: if isOwner();
@@ -21,7 +275,29 @@ service cloud.firestore {
       allow read: if isOwner() || resource.data.status == 'DISPONIVEL';
       allow create: if isOwner()
         && request.resource.data.status == 'DISPONIVEL';
-      allow update, delete: if isOwner();
+      allow update: if (
+          resource.data.status == 'DISPONIVEL'
+          && request.resource.data.reservationId is string
+          && itemReserveFor(itemId, request.resource.data.reservationId)
+        )
+        || (
+          resource.data.status == 'RESERVADO'
+          && resource.data.reservationId is string
+          && request.resource.data.status == 'DISPONIVEL'
+          && itemReleaseFor(resource.data.reservationId)
+        )
+        || (
+          resource.data.status == 'RESERVADO'
+          && resource.data.reservationId is string
+          && request.resource.data.status == 'VENDIDO'
+          && itemSaleFor(resource.data.reservationId)
+        )
+        || (
+          isOwner()
+          && request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['itemTypeName'])
+        );
+      allow delete: if isOwner() && resource.data.status == 'DISPONIVEL';
     }
 
     match /pickupSpots/{pickupSpotId} {
@@ -45,7 +321,11 @@ service cloud.firestore {
     match /reservations/{reservationId} {
       allow read: if isOwner()
         || (signedIn() && resource.data.userId == request.auth.uid);
-      allow create, update, delete: if false;
+      allow create: if reservationCreateIsValid(reservationId);
+      allow update: if reservationCancelIsValid(reservationId)
+        || reservationSaleIsValid(reservationId);
+      allow delete: if isOwner()
+        && resource.data.status in ['CANCELADA', 'CONCLUIDA'];
     }
   }
 }

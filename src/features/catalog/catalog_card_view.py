@@ -23,12 +23,14 @@ class CatalogCardView:
         is_owner: bool,
         on_quantity_change: Callable[[int], None],
         on_edit: Callable[[], Awaitable[None]] | None = None,
+        on_remove_stock: Callable[[], Awaitable[None]] | None = None,
     ):
         self.cake = cake
         self.quantity = quantity
         self.is_owner = is_owner
         self.on_quantity_change = on_quantity_change
         self.on_edit = on_edit
+        self.on_remove_stock = on_remove_stock
 
     def build(self) -> ft.Control:
         cake = self.cake
@@ -36,17 +38,30 @@ class CatalogCardView:
         if not cake.is_active:
             status_text = "Inativo"
         elif available:
-            status_text = f"{cake.stock} disponíveis"
+            status_text = (
+                f"{cake.stock} não reservados"
+                if self.is_owner
+                else f"{cake.stock} disponíveis"
+            )
         elif cake.is_custom_order_only:
             status_text = "Sob encomenda"
         else:
             status_text = "Esgotado no momento"
         status_color = GREEN if cake.is_active and available else MUTED
 
-        footer = (
-            self._quantity_control()
-            if available
-            else ft.Container(
+        if available:
+            footer_controls = [self._quantity_control()]
+            if self.is_owner and self.on_remove_stock is not None:
+                footer_controls.append(
+                    ft.TextButton(
+                        "Remover 1 não reservado",
+                        icon=ft.Icons.DELETE_OUTLINE,
+                        on_click=self._remove_stock,
+                    )
+                )
+            footer = ft.Column(controls=footer_controls, spacing=4)
+        else:
+            footer = ft.Container(
                 content=ft.Text(
                     (
                         "Encomendas ainda indisponíveis"
@@ -62,7 +77,6 @@ class CatalogCardView:
                 border_radius=14,
                 padding=ft.Padding.symmetric(vertical=12),
             )
-        )
         overlays = [
             ft.Container(
                 expand=True,
@@ -250,3 +264,7 @@ class CatalogCardView:
     async def _edit_item_type(self, _=None) -> None:
         if self.on_edit is not None:
             await self.on_edit()
+
+    async def _remove_stock(self, _=None) -> None:
+        if self.on_remove_stock is not None:
+            await self.on_remove_stock()

@@ -13,7 +13,7 @@ O **MaphiApp** é um sistema projetado para intermediar a venda, produção e lo
 ### Principais Pilares do Negócio
 1. **Controle Estrito de Estoque**: Sabores/cardápio são separados das unidades físicas em estoque.
 2. **Logística Baseada em Janelas de Tempo**: As retiradas acontecem em pontos cadastrados com horários específicos de permanência (mínimo 15 minutos).
-3. **Regras de Promoção e Limite por Cliente**: Um único cliente pode reservar no máximo **2 bolos por vez** para aplicar o dinamismo de vendas e garantir controle promocional.
+3. **Classificação de Vendas**: Reservas de clientes são classificadas como `PROMOCAO`; reservas criadas pelo dono para venda presencial são `NORMAL`. Não há limite total de unidades ativas por cliente. Cada documento de reserva pode conter até 2 unidades, e seleções maiores são divididas em reservas adicionais para validação pelas regras do Firestore.
 4. **Resiliência e Atendimento Pré-venda/Pós-venda**: Integração direta com WhatsApp para rápida resolução de imprevistos ou suporte ao cliente.
 
 ---
@@ -33,9 +33,9 @@ O **MaphiApp** é um sistema projetado para intermediar a venda, produção e lo
 - **RN02 (Operações Autenticadas)**: Operações de reserva, alteração de dados e acesso ao painel administrativo exigem autenticação válida (E-mail/Senha forte ou Google OAuth).
 - **RN03 & RN09 (Margem Logística)**: A reserva só é permitida se o horário de encerramento do ponto de entrega for superior a **15 minutos** em relação ao momento atual.
 - **RN04 (Separação Sabor vs. Unidade)**: O cadastro de um `ItemType` (Sabor) é desassociado do lançamento de instâncias físicas (`Item`).
-- **RN05 (Limite de Reservas)**: Máximo de **2 unidades** reservadas por cliente ativo.
+- **RN05 (Limite por Documento de Reserva)**: Não há limite total de unidades ativas por cliente no MVP. Cada documento de reserva contém no máximo **2 unidades**; seleções maiores são divididas em documentos adicionais.
 - **RN07 / RN08 (Exclusão Segura de Sabores)**: Donos só podem remover um `ItemType` da base de dados se **não** existirem unidades físicas em estoque vinculadas a ele.
-- **RN10 (Distinção de Vendas)**: O sistema deve classificar a transação como `PROMOÇÃO` (reservas de até 2 unidades) ou `NORMAL` (vendas avulsas/presenciais).
+- **RN10 (Distinção de Vendas)**: O sistema classifica reservas de clientes como `PROMOCAO` e reservas do dono para vendas presenciais como `NORMAL`. Cada documento de reserva agrupa no máximo 2 unidades.
 - **RN11 (Critérios de Senha Forte)**: Mínimo 8 caracteres, contendo pelo menos 1 caractere especial, letras e números.
 - **RN13 (Janela de Agendamento de Notificação - Batching)**: Para evitar spam, o lançamento de novas unidades aciona um timer de **30 minutos**. Lançamentos adicionais dentro dessa janela são agrupados. A notificação push consolidada só é disparada ao final dos 30 minutos.
 - **RN14 (Baixa em Estoque com Impacto em Reservas)**: Se o Dono forçar a remoção de unidades de estoque em quantidade superior ao estoque livre (atingindo bolos já reservados):
@@ -140,7 +140,7 @@ Ao implementar as rotas/controllers, garanta o atendimento aos fluxos estabeleci
 | **UC06** | Gerenciar Locais de Retirada | Dono | CRUD de `PickupSpot`. Validar janela de horário (mínimo 15min de tolerância). |
 | **UC07** | Entregas Pendentes por Local | Dono | Query de agregação agrupando `Reservation` ativas por `pickupSpotId`, contando totais de `SaleType.PROMOCAO` vs `SaleType.NORMAL`. |
 | **UC08** | Listar Bolos em Estoque | Público / Usuário | Listar `ItemType` unindo contagem de `Item` com `status == DISPONIVEL`. Público para leitura. |
-| **UC09** | Realizar Reserva | Cliente / Dono | Validar limite de 2 unidades por usuário (`RN05`). Transação atômica (DB Lock) para alterar status de `Item` para `RESERVADO` e criar `Reservation`. |
+| **UC09** | Realizar Reserva | Cliente / Dono | Dividir seleções em documentos de até 2 unidades (`RN05`). Transação atômica para alterar status de `Item` para `RESERVADO` e criar `Reservation`, sem limite total por cliente. |
 | **UC10** | Visualizar Locais Disponíveis | Usuário / Dono | Consulta pública/autenticada de `PickupSpot` onde `isActive == true`. |
 | **UC11** | Desfazer Reserva | Usuário / Dono | Transação: alterar `Reservation.status` para `CANCELADA` e atualizar os `Item.status` de volta para `DISPONIVEL`. |
 | **UC12** | Visualizar Reservas | Usuário / Dono | Se cliente: filtrar por `userId`. Se dono: permitir listagem global com busca e atalhos para WhatsApp. |
@@ -156,7 +156,7 @@ Ao implementar as rotas/controllers, garanta o atendimento aos fluxos estabeleci
 3. **Deep Linking / WhatsApp Direct**:
    - Os endpoints e respostas do frontend devem formatar links `https://wa.me/<PHONE>?text=<MENSAGEM_ENCODADA>` incluindo o número do pedido/reserva para facilitar a comunicação imediata em caso de dúvidas ou cancelamentos excepcionais.
 4. **Respostas HTTP e Tratamento de Erros**:
-   - `400 Bad Request`: Limite de reservas excedido (RN05) ou senha fraca (RN11).
+   - `400 Bad Request`: Reserva inválida ou senha fraca (RN11).
    - `409 Conflict`: Tentativa de apagar sabor com unidades ativas (RN07) ou baixa de estoque atingindo reservas ativas (RN14 - onde o body retornará a estrutura de reservas em conflito para confirmação).
 ```
 

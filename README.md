@@ -46,6 +46,8 @@ de service account no `.env` do cliente.
 - `src/features/catalog/catalog_view.py`: interface do catálogo.
 - `src/features/catalog/catalog_card_view.py`: apresentação e interações de cada card.
 - `src/features/catalog/catalog_logic.py`: carregamento, filtros e seleção do catálogo.
+- `src/features/reservations/reservation_view.py` e `reservation_logic.py`:
+  criação, consulta e gestão de reservas.
 - `src/features/auth/auth_view.py`: formulários de login/cadastro e layouts responsivos.
 - `src/features/auth/auth_logic.py`: estado e regras da interface de autenticação.
 - `src/features/auth/account_button_view.py`: botão de login/nome do usuário no cabeçalho.
@@ -128,15 +130,22 @@ estas coleções e campos:
   local de São Paulo (`DD/MM/AAAA HH:MM`). A janela deve ter pelo menos 15 minutos;
   para clientes, o local só aparece quando a saída ainda estiver a mais de
   15 minutos do horário atual. O dono pode criar, editar e excluir locais pelo
-  catálogo, inclusive remover locais obsoletos. Locais legados sem timestamps
+  catálogo, inclusive remover locais obsoletos. Ao excluir um local, ele é
+  desativado primeiro, as reservas ativas são canceladas e suas unidades voltam
+  ao estoque antes da remoção definitiva. Locais legados sem timestamps
   completos ficam ocultos para clientes e podem ser editados ou removidos pelo
-  dono. O catálogo mantém o ID do local selecionado no estado da aplicação para
-  uso pela futura funcionalidade de reserva.
+  dono.
 - `users/{uid}`: `name`, `phone`, `createdAt`. Cada usuário lê e altera apenas
   seu próprio perfil; não pode definir seu próprio papel.
 - `reservations`: `userId`, `pickupSpotId`, `itemIds`, `itemTypeNames`,
-  `saleType`, `status`, `createdAt`. Leitura apenas pelo cliente proprietário
-  ou pelo dono.
+  `itemTypeIds`, `unitPrices`, `totalAmount`, snapshot do local de retirada,
+  `saleType`, `status` e timestamps de criação, cancelamento e conclusão.
+  Leitura apenas pelo cliente proprietário ou pelo dono. Cada reserva agrupa
+  até duas unidades para manter a atualização de estoque verificável pelas
+  regras do Firestore; seleções maiores são divididas automaticamente em
+  reservas adicionais. Não há limite total de unidades ativas por cliente.
+  O dono pode criar reservas para vendas presenciais, filtrar a lista por local,
+  cancelar ou concluir reservas e apagar reservas já canceladas ou concluídas.
 
 Ao iniciar, o app carrega os `itemTypes` e conta os documentos de `items` com
 status `DISPONIVEL` para exibir o estoque de cada sabor. Donos podem registrar
@@ -144,15 +153,17 @@ uma produção pelo FAB, selecionando um ou mais sabores e suas quantidades; cad
 bolo é salvo como um documento individual em `items`, em uma gravação atômica
 de até 500 unidades por inserção. As unidades novas começam com status
 `DISPONIVEL`. Ao renomear um sabor, o app também atualiza `itemTypeName` nas
-unidades de estoque associadas.
+unidades de estoque associadas. A contagem exibida ao dono é de unidades não
+reservadas; a remoção só exclui um documento com status `DISPONIVEL`, protegida
+por transação e pelas regras Firestore.
 
 As regras identificam o dono por `users/{uid}.role == "DONO"`. O próprio usuário
 não pode criar ou editar esse campo: a conta de dono inicial deve receber o papel
 por uma ação administrativa no Console do Firebase. Contas sem esse papel têm
-permissões de cliente. A criação e alteração de reservas pelo cliente permanecem
-bloqueadas até implementarmos uma operação transacional confiável para atualizar
-reserva e estoque em conjunto. O limite de reservas por cliente e os bolos sob
-encomenda não fazem parte deste MVP.
+permissões de cliente. Reservar, cancelar e concluir uma reserva atualiza
+atomicamente o estado da reserva e das unidades de estoque. Clientes podem
+cancelar apenas as próprias reservas; o dono pode cancelar reservas de qualquer
+usuário, e essa origem fica visível na listagem do cliente.
 
 Fotos de sabores são enviadas ao Firebase Storage, em `itemTypes/{uid}/`, antes
 de o sabor ser gravado. As regras em `storage.rules` permitem leitura das imagens

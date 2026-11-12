@@ -38,6 +38,9 @@ class FirebaseFirestoreClient:
         return path
 
     def _document_name(self, collection: str, document_id: str) -> str:
+        return self.document_name(collection, document_id)
+
+    def document_name(self, collection: str, document_id: str) -> str:
         return f"{self._documents_resource()}/{collection}/{document_id}"
 
     async def get_document(
@@ -147,6 +150,83 @@ class FirebaseFirestoreClient:
             method="DELETE",
         )
 
+    async def begin_transaction(self, id_token: str) -> str:
+        result = await self._request(
+            f"{self._documents_url()}:beginTransaction",
+            id_token=id_token,
+            method="POST",
+            payload={"options": {"readWrite": {}}},
+        )
+        transaction = result.get("transaction") if isinstance(result, dict) else None
+        if not transaction:
+            raise FirebaseRestError(
+                "O Firestore não retornou o identificador da transação."
+            )
+        return transaction
+
+    async def run_query_in_transaction(
+        self, structured_query: dict, transaction: str, id_token: str
+    ) -> list:
+        result = await self._request(
+            f"{self._documents_url()}:runQuery",
+            id_token=id_token,
+            method="POST",
+            payload={
+                "structuredQuery": structured_query,
+                "transaction": transaction,
+            },
+        )
+        if not isinstance(result, list):
+            raise FirebaseRestError("O Firestore retornou uma consulta inválida.")
+        return result
+
+    async def batch_get_in_transaction(
+        self,
+        document_names: list[str],
+        transaction: str,
+        id_token: str,
+    ) -> list:
+        if not document_names:
+            return []
+        result = await self._request(
+            f"{self._documents_url()}:batchGet",
+            id_token=id_token,
+            method="POST",
+            payload={
+                "documents": document_names,
+                "transaction": transaction,
+            },
+        )
+        if not isinstance(result, list):
+            raise FirebaseRestError("O Firestore retornou documentos inválidos.")
+        return result
+
+    async def commit_transaction(
+        self, writes: list[dict], transaction: str, id_token: str
+    ) -> dict:
+        if len(writes) > MAX_FIRESTORE_BATCH_WRITES:
+            raise ValueError(
+                f"Cada transação pode conter no máximo "
+                f"{MAX_FIRESTORE_BATCH_WRITES} gravações."
+            )
+        result = await self._request(
+            f"{self._documents_url()}:commit",
+            id_token=id_token,
+            method="POST",
+            payload={"writes": writes, "transaction": transaction},
+        )
+        return result if isinstance(result, dict) else {}
+
+    async def rollback_transaction(
+        self, transaction: str, id_token: str
+    ) -> None:
+        await self._request(
+            f"{self._documents_url()}:rollback",
+            id_token=id_token,
+            method="POST",
+            payload={"transaction": transaction},
+        )
+
     async def list_active_item_types(self) -> list:
         return await self._request(
             f"{self._documents_url()}:runQuery",
@@ -199,6 +279,67 @@ class FirebaseFirestoreClient:
                     },
                 }
             },
+        )
+
+    async def list_pickup_spots(
+        self, *, include_inactive: bool, id_token: str | None = None
+    ) -> list:
+        query = {"from": [{"collectionId": "pickupSpots"}]}
+        if not include_inactive:
+            query["where"] = {
+                "fieldFilter": {
+                    "field": {"fieldPath": "isActive"},
+                    "op": "EQUAL",
+                    "value": {"booleanValue": True},
+                }
+            }
+        return await self._request(
+            f"{self._documents_url()}:runQuery",
+            id_token=id_token,
+            method="POST",
+            payload={"structuredQuery": query},
+        )
+
+    async def list_reservations(
+        self,
+        *,
+        id_token: str,
+        user_id: str | None = None,
+        pickup_spot_id: str | None = None,
+    ) -> list:
+        filters = []
+        if user_id:
+            filters.append(
+                {
+                    "fieldFilter": {
+                        "field": {"fieldPath": "userId"},
+                        "op": "EQUAL",
+                        "value": {"stringValue": user_id},
+                    }
+                }
+            )
+        if pickup_spot_id:
+            filters.append(
+                {
+                    "fieldFilter": {
+                        "field": {"fieldPath": "pickupSpotId"},
+                        "op": "EQUAL",
+                        "value": {"stringValue": pickup_spot_id},
+                    }
+                }
+            )
+        query = {"from": [{"collectionId": "reservations"}]}
+        if len(filters) == 1:
+            query["where"] = filters[0]
+        elif filters:
+            query["where"] = {
+                "compositeFilter": {"op": "AND", "filters": filters}
+            }
+        return await self._request(
+            f"{self._documents_url()}:runQuery",
+            id_token=id_token,
+            method="POST",
+            payload={"structuredQuery": query},
         )
 
     async def list_item_types(self, id_token: str) -> list:
