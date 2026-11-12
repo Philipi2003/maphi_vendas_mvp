@@ -2,13 +2,36 @@
 
 Aplicação web em Python com Flet e Firebase Hosting.
 
-O catálogo inicial em `src/features/catalog/catalog_logic.py` usa bolos e quantidades de demonstração.
-Login e reserva ainda não estão conectados ao Firebase; a interface informa isso
-explicitamente e não confirma nenhuma operação real.
+O catálogo lista os sabores ativos cadastrados na coleção `itemTypes` do Firestore;
+sabores de demonstração locais não são exibidos.
+A autenticação por e-mail/senha já está conectada ao Firebase Authentication via REST API,
+contanto que a variável de ambiente `FIREBASE_API_KEY` esteja configurada com a Web API key
+exposta no projeto do Firebase. O login com Google usa o Firebase Web SDK por uma pequena
+ponte JavaScript incluída nos assets do build web.
 
 O acesso abre uma tela dedicada em aparelhos com largura menor que 768 px e um
 modal em telas maiores. Ambos oferecem login por e-mail/senha, acesso com Google
-e alternância para cadastro; a autenticação ainda será integrada ao Firebase.
+e alternância para cadastro. O fluxo de e-mail/senha já foi integrado ao Firebase
+Authentication e usa a Web API Key do projeto para autenticar usuários via REST API.
+Credenciais inválidas são informadas diretamente no formulário de login para que
+o usuário possa corrigir os dados sem fechar a tela.
+
+## Configuração do Firebase Authentication
+
+Em PowerShell, defina a Web API key do projeto Firebase antes de iniciar a aplicação:
+
+```powershell
+$env:FIREBASE_API_KEY = "SUA_API_KEY_DO_FIREBASE"
+```
+
+Essa chave é pública no cliente e deve ser obtida nas configurações do projeto Firebase
+(Web API Key). Não é um segredo do servidor e não deve ser confundida com a Private Key
+em arquivos de serviço.
+
+Para o Google Sign-In, habilite Google em **Firebase Console → Authentication →
+Sign-in method** e autorize os domínios de teste e produção em **Authentication →
+Settings → Authorized domains**. Nunca coloque OAuth client secrets ou credenciais
+de service account no `.env` do cliente.
 
 ## Organização do código
 
@@ -16,7 +39,8 @@ e alternância para cadastro; a autenticação ainda será integrada ao Firebase
 - `src/app_config.py`: configurações da aplicação e tema.
 - `src/application.py`: composição das features e estado compartilhado da aplicação.
 - `src/features/catalog/catalog_view.py`: interface do catálogo.
-- `src/features/catalog/catalog_logic.py`: dados de demonstração, filtros e seleção.
+- `src/features/catalog/catalog_card_view.py`: apresentação e interações de cada card.
+- `src/features/catalog/catalog_logic.py`: carregamento, filtros e seleção do catálogo.
 - `src/features/auth/auth_view.py`: formulários de login/cadastro e layouts responsivos.
 - `src/features/auth/auth_logic.py`: estado e regras da interface de autenticação.
 - `src/features/auth/account_button_view.py`: botão de login/nome do usuário no cabeçalho.
@@ -42,16 +66,37 @@ Após associar este diretório ao projeto Firebase, gere os arquivos web e publi
 
 ```powershell
 $env:PYTHONUTF8 = "1"
-.\.venv\Scripts\flet.exe build web
+if (-not (Test-Path .env)) { throw "Arquivo .env não encontrado." }
+if (Test-Path src\.env) { throw "src\.env já existe; remova-o ou faça backup antes do build." }
+$publicKeys = "FIREBASE_API_KEY|AUTH_DOMAIN|PROJECT_ID|STORAGE_BUCKET|MESSAGING_SENDER_ID|APP_ID|MEASUREMENT_ID"
+$publicConfig = Get-Content .env | Where-Object { $_ -match "^\s*($publicKeys)\s*=" }
+if (-not $publicConfig) { throw "Nenhuma configuração pública do Firebase foi encontrada no .env." }
+try {
+    $publicConfig | Set-Content src\.env -Encoding ascii
+    .\.venv\Scripts\flet.exe build web --include .env
+    if ($LASTEXITCODE -ne 0) { throw "O build web falhou." }
+}
+finally {
+    Remove-Item src\.env -Force
+}
 firebase deploy --only hosting
 ```
+
+O build copia apenas as sete configurações públicas do Firebase para o pacote web.
+Não coloque segredos ou credenciais de servidor no `.env`, pois o conteúdo incluído
+no app estático pode ser lido por qualquer visitante.
+
+O Google Sign-In via ponte JavaScript é executado no build estático WebAssembly.
+Para testar localmente esse fluxo, sirva o build com `.\.venv\Scripts\flet.exe serve build\web`;
+`flet run --web` executa o app pelo servidor Python e não fornece o runtime Pyodide usado
+pela ponte.
 
 O build é gerado em `build/web`, diretório configurado como origem do Firebase Hosting
 em `firebase.json`.
 
 O pacote npm `firebase` é o SDK JavaScript e não é usado pela aplicação Python.
-`firebase-tools` é a CLI de deploy; a integração com os serviços Firebase será feita
-em Python por APIs REST.
+`firebase-tools` é a CLI de deploy; a aplicação acessa Firebase Authentication e
+Cloud Firestore pelas APIs REST.
 
 ## Firestore
 
@@ -65,8 +110,12 @@ O Firestore cria uma coleção quando o primeiro documento é gravado; não há
 necessidade de semear documentos fictícios para criar coleções vazias. O MVP usa
 estas coleções e campos:
 
-- `itemTypes`: `name`, `description`, `imageUrl`, `isActive`, `createdAt`.
-  Leitura pública apenas dos documentos ativos.
+- `itemTypes`: `name`, `description`, `imageUrl`, `isCustomOrderOnly`,
+  `regularPrice`, `promotionalPrice` (opcional), `isActive`, `createdAt`.
+  Perfis públicos e clientes listam apenas sabores ativos; o dono também pode
+  visualizar sabores inativos, editar seus dados e alternar `isActive`.
+  Criação, edição e exclusão exigem perfil com `role: "DONO"`. O app só oferece
+  exclusão quando não há documentos de estoque associados ao sabor.
 - `items`: `itemTypeId`, `itemTypeName`, `status`, `expirationDate` (opcional),
   `createdAt`. Leitura pública apenas das unidades com status `DISPONIVEL`.
 - `pickupSpots`: `name`, `address`, `timeWindow`, `isActive`, `createdAt`.
@@ -77,6 +126,10 @@ estas coleções e campos:
   `saleType`, `status`, `createdAt`. Leitura apenas pelo cliente proprietário
   ou pelo dono.
 
+Ao iniciar, o app carrega os `itemTypes` ativos do Firestore. Sabores cadastrados
+sem unidades físicas aparecem sem estoque; a leitura das unidades da coleção
+`items` será integrada na funcionalidade de estoque.
+
 As regras identificam o dono por `users/{uid}.role == "DONO"`. O próprio usuário
 não pode criar ou editar esse campo: a conta de dono inicial deve receber o papel
 por uma ação administrativa no Console do Firebase. Contas sem esse papel têm
@@ -84,3 +137,26 @@ permissões de cliente. A criação e alteração de reservas pelo cliente perma
 bloqueadas até implementarmos uma operação transacional confiável para atualizar
 reserva e estoque em conjunto. O limite de reservas por cliente e os bolos sob
 encomenda não fazem parte deste MVP.
+
+Fotos de sabores são enviadas ao Firebase Storage, em `itemTypes/{uid}/`, antes
+de o sabor ser gravado. As regras em `storage.rules` permitem leitura das imagens
+do catálogo e limitam o envio a donos autenticados e a imagens JPG, PNG ou WEBP
+de até 5 MB. Publique as regras com:
+
+```powershell
+firebase deploy --only storage
+```
+
+Para o Flutter Web conseguir carregar as imagens em cards, configure CORS no
+bucket. O bucket deve ser atualizado com uma conta Google Cloud que tenha
+permissão para administrar o Storage:
+
+```powershell
+$storageBucketLine = Get-Content .env | Where-Object { $_ -match "^\s*STORAGE_BUCKET\s*=" } | Select-Object -First 1
+if (-not $storageBucketLine) { throw "STORAGE_BUCKET não encontrado no .env." }
+$storageBucket = (($storageBucketLine -split "=", 2)[1]).Trim().Trim('"').Trim("'")
+gcloud storage buckets update "gs://$storageBucket" --cors-file=storage.cors.json
+```
+
+Essa configuração libera requisições cross-origin de leitura, envio e exclusão
+de imagens; as regras do Firebase Storage continuam controlando o acesso aos objetos.

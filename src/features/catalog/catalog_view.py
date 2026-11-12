@@ -10,7 +10,13 @@ from app_config import (
     MUTED,
     SURFACE,
 )
-from features.catalog.catalog_logic import Cake, CatalogController
+from features.catalog.catalog_logic import (
+    Cake,
+    CatalogController,
+    ItemTypeImageCleanupError,
+)
+from features.catalog.catalog_card_view import CatalogCardView
+from firebase_rest import FirebaseRestError
 
 
 class CatalogView:
@@ -20,11 +26,46 @@ class CatalogView:
         controller: CatalogController,
         account_button: ft.Control,
         on_reserve,
+        on_create_item_type,
+        on_update_item_type,
+        on_delete_item_type,
+        on_check_item_type_inventory,
+        on_notice,
+        on_message,
     ):
         self.page = page
         self.controller = controller
         self.on_reserve = on_reserve
+        self.on_create_item_type = on_create_item_type
+        self.on_update_item_type = on_update_item_type
+        self.on_delete_item_type = on_delete_item_type
+        self.on_check_item_type_inventory = on_check_item_type_inventory
+        self.on_notice = on_notice
+        self.on_message = on_message
+        self.is_owner = False
         self.filter_controls: dict[str, ft.Container] = {}
+        self.item_type_dialog: ft.AlertDialog | None = None
+        self.editing_item_type: Cake | None = None
+        self.item_type_name: ft.TextField | None = None
+        self.item_type_description: ft.TextField | None = None
+        self.item_type_regular_price: ft.TextField | None = None
+        self.item_type_promotional_price: ft.TextField | None = None
+        self.item_type_image_label: ft.Text | None = None
+        self.item_type_custom_order: ft.Checkbox | None = None
+        self.item_type_is_active: ft.Checkbox | None = None
+        self.item_type_delete_button: ft.TextButton | None = None
+        self.item_type_submit_button: ft.FilledButton | None = None
+        self.selected_image_data: bytes | None = None
+        self.selected_image_name: str | None = None
+        self.selected_image_content_type: str | None = None
+        self.image_picker = ft.FilePicker()
+        self.page.services.append(self.image_picker)
+        self.owner_add_button = ft.FilledButton(
+            "Adicionar sabor",
+            icon=ft.Icons.ADD,
+            visible=False,
+            on_click=self._open_item_type_form,
+        )
         self.results_label = ft.Text(color=MUTED, size=13)
         self.selection_label = ft.Text(
             color=ACCENT, size=13, weight=ft.FontWeight.W_600, visible=False
@@ -229,7 +270,12 @@ class CatalogView:
                 ft.Container(
                     col={"xs": 12, "sm": 6},
                     alignment=ft.Alignment.CENTER_RIGHT,
-                    content=self.selection_label,
+                    content=ft.Row(
+                        controls=[self.selection_label, self.owner_add_button],
+                        alignment=ft.MainAxisAlignment.END,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        spacing=12,
+                    ),
                 ),
             ],
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -269,6 +315,275 @@ class CatalogView:
             ),
         )
 
+    def set_owner(self, is_owner: bool) -> None:
+        self.is_owner = is_owner
+        self.owner_add_button.visible = is_owner
+        self.refresh()
+        self.page.update()
+
+    async def _open_item_type_form(
+        self, _=None, *, item_type: Cake | None = None
+    ) -> None:
+        can_delete = False
+        if item_type is not None:
+            try:
+                can_delete = await self.on_check_item_type_inventory(item_type.id)
+            except (FirebaseRestError, ValueError) as exc:
+                self.on_message(f"Não foi possível verificar o estoque do sabor: {exc}")
+                return
+
+        self.editing_item_type = item_type
+        self.item_type_name = ft.TextField(
+            label="Nome do sabor",
+            value=item_type.name if item_type else "",
+            border_radius=12,
+            autofocus=True,
+        )
+        self.item_type_description = ft.TextField(
+            label="Descrição",
+            value=item_type.description if item_type else "",
+            multiline=True,
+            min_lines=2,
+            max_lines=4,
+            border_radius=12,
+        )
+        self.item_type_regular_price = ft.TextField(
+            label="Preço normal (R$)",
+            hint_text="Ex.: 45,00",
+            value=self._price_field_value(
+                item_type.regular_price if item_type else None
+            ),
+            keyboard_type=ft.KeyboardType.NUMBER,
+            border_radius=12,
+        )
+        self.item_type_promotional_price = ft.TextField(
+            label="Preço promocional (opcional)",
+            hint_text="Ex.: 39,90",
+            value=self._price_field_value(
+                item_type.promotional_price if item_type else None
+            ),
+            keyboard_type=ft.KeyboardType.NUMBER,
+            border_radius=12,
+        )
+        self.selected_image_data = None
+        self.selected_image_name = None
+        self.selected_image_content_type = None
+        self.item_type_image_label = ft.Text(
+            (
+                "Foto atual (selecione para substituir)"
+                if item_type and item_type.image_url
+                else "Nenhuma foto selecionada"
+            ),
+            color=MUTED,
+            size=12,
+        )
+        self.item_type_custom_order = ft.Checkbox(
+            label="Somente sob encomenda",
+            value=item_type.is_custom_order_only if item_type else False,
+        )
+        self.item_type_is_active = ft.Checkbox(
+            label="Ativo no catálogo",
+            value=item_type.is_active if item_type else True,
+        )
+        self.item_type_submit_button = ft.FilledButton(
+            "Salvar alterações" if item_type else "Salvar sabor",
+            icon=ft.Icons.SAVE_OUTLINED,
+            on_click=self._submit_item_type,
+        )
+        self.item_type_delete_button = ft.TextButton(
+            "Excluir sabor",
+            visible=bool(item_type and can_delete),
+            on_click=self._ask_delete_item_type,
+        )
+        self.item_type_dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("Editar sabor" if item_type else "Novo sabor"),
+            content=ft.Container(
+                width=440,
+                content=ft.Column(
+                    controls=[
+                        self.item_type_name,
+                        self.item_type_description,
+                        self.item_type_regular_price,
+                        self.item_type_promotional_price,
+                        ft.Row(
+                            controls=[
+                                ft.OutlinedButton(
+                                    "Adicionar foto",
+                                    icon=ft.Icons.IMAGE_OUTLINED,
+                                    on_click=self._pick_item_type_image,
+                                ),
+                                self.item_type_image_label,
+                            ],
+                            spacing=10,
+                        ),
+                        self.item_type_custom_order,
+                        self.item_type_is_active,
+                    ],
+                    tight=True,
+                    spacing=12,
+                ),
+            ),
+            actions=[
+                ft.TextButton(
+                    "Cancelar",
+                    on_click=lambda _: self._close_item_type_form(),
+                ),
+                self.item_type_delete_button,
+                self.item_type_submit_button,
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+        self.page.show_dialog(self.item_type_dialog)
+
+    @staticmethod
+    def _price_field_value(value: float | None) -> str:
+        return f"{value:.2f}".replace(".", ",") if value is not None else ""
+
+    async def _pick_item_type_image(self, _=None) -> None:
+        selected_files = await self.image_picker.pick_files(
+            dialog_title="Selecione uma foto do sabor",
+            file_type=ft.FilePickerFileType.IMAGE,
+            allow_multiple=False,
+            with_data=True,
+        )
+        if not selected_files:
+            return
+
+        selected_file = selected_files[0]
+        extension = selected_file.name.rsplit(".", 1)[-1].lower()
+        content_types = {
+            "jpg": "image/jpeg",
+            "jpeg": "image/jpeg",
+            "png": "image/png",
+            "webp": "image/webp",
+        }
+        content_type = content_types.get(extension)
+        if content_type is None:
+            self.on_message("Use uma foto JPG, PNG ou WEBP.")
+            return
+        if selected_file.size > 5 * 1024 * 1024:
+            self.on_message("A foto deve ter no máximo 5 MB.")
+            return
+        if selected_file.bytes is None:
+            self.on_message("Não foi possível ler a foto selecionada.")
+            return
+
+        self.selected_image_data = selected_file.bytes
+        self.selected_image_name = selected_file.name
+        self.selected_image_content_type = content_type
+        if self.item_type_image_label is not None:
+            self.item_type_image_label.value = selected_file.name
+            self.page.update()
+
+    def _close_item_type_form(self) -> None:
+        if self.item_type_dialog is not None:
+            self.page.pop_dialog()
+            self.item_type_dialog = None
+        self.editing_item_type = None
+
+    async def _submit_item_type(self, _=None) -> None:
+        if (
+            self.item_type_name is None
+            or self.item_type_description is None
+            or self.item_type_regular_price is None
+            or self.item_type_promotional_price is None
+            or self.item_type_custom_order is None
+            or self.item_type_is_active is None
+        ):
+            raise RuntimeError("O formulário de sabor não foi inicializado.")
+
+        name = (self.item_type_name.value or "").strip()
+        if not name:
+            self.on_message("Informe o nome do sabor.")
+            return
+
+        if self.item_type_submit_button is not None:
+            self.item_type_submit_button.disabled = True
+            self.page.update()
+
+        try:
+            values = {
+                "name": name,
+                "description": self.item_type_description.value or "",
+                "regular_price": self.item_type_regular_price.value or "",
+                "promotional_price": self.item_type_promotional_price.value or "",
+                "is_custom_order_only": bool(self.item_type_custom_order.value),
+                "is_active": bool(self.item_type_is_active.value),
+                "image_data": self.selected_image_data,
+                "image_filename": self.selected_image_name,
+                "image_content_type": self.selected_image_content_type,
+            }
+            if self.editing_item_type is None:
+                await self.on_create_item_type(**values)
+                success_message = "Sabor adicionado ao catálogo."
+            else:
+                await self.on_update_item_type(
+                    item_type_id=self.editing_item_type.id,
+                    **values,
+                )
+                success_message = "Sabor atualizado."
+
+            self.refresh()
+            self._close_item_type_form()
+            self.page.update()
+            self.on_notice(success_message)
+        except ItemTypeImageCleanupError as exc:
+            self.refresh()
+            self._close_item_type_form()
+            self.page.update()
+            self.on_message(str(exc))
+        except FirebaseRestError as exc:
+            self.on_message(f"Não foi possível salvar o sabor: {exc}")
+        except ValueError as exc:
+            self.on_message(str(exc))
+        finally:
+            if self.item_type_dialog is not None:
+                if self.item_type_submit_button is not None:
+                    self.item_type_submit_button.disabled = False
+                self.page.update()
+
+    def _ask_delete_item_type(self, _=None) -> None:
+        if self.editing_item_type is None:
+            return
+        self.page.show_dialog(
+            ft.AlertDialog(
+                modal=True,
+                title=ft.Text("Excluir sabor?"),
+                content=ft.Text(
+                    f'O sabor "{self.editing_item_type.name}" será removido '
+                    "permanentemente do catálogo."
+                ),
+                actions=[
+                    ft.TextButton(
+                        "Cancelar",
+                        on_click=lambda _: self.page.pop_dialog(),
+                    ),
+                    ft.TextButton(
+                        "Excluir",
+                        on_click=self._confirm_delete_item_type,
+                    ),
+                ],
+                actions_alignment=ft.MainAxisAlignment.END,
+            )
+        )
+
+    async def _confirm_delete_item_type(self, _=None) -> None:
+        if self.editing_item_type is None:
+            return
+        item_type = self.editing_item_type
+        try:
+            await self.on_delete_item_type(item_type.id)
+            self.page.pop_dialog()
+            self.refresh()
+            self._close_item_type_form()
+            self.page.update()
+            self.on_notice("Sabor excluído do catálogo.")
+        except FirebaseRestError as exc:
+            self.on_message(f"Não foi possível excluir o sabor: {exc}")
+        except ValueError as exc:
+            self.on_message(str(exc))
+
     def _choose_filter(self, value: str) -> None:
         self.controller.set_filter(value)
         self.refresh()
@@ -279,162 +594,30 @@ class CatalogView:
         self.refresh()
         self.page.update()
 
-    def _quantity_control(self, cake: Cake) -> ft.Control:
-        quantity = self.controller.quantities[cake.id]
-
-        def change(amount: int) -> None:
-            self.controller.change_quantity(cake.id, amount)
-            self.refresh()
-            self.page.update()
-
-        return ft.Container(
-            content=ft.Row(
-                controls=[
-                    ft.IconButton(
-                        icon=ft.Icons.REMOVE,
-                        icon_size=17,
-                        icon_color=ACCENT if quantity else MUTED,
-                        disabled=quantity == 0,
-                        tooltip="Remover uma unidade",
-                        on_click=lambda _: change(-1),
-                    ),
-                    ft.Text(
-                        str(quantity),
-                        width=24,
-                        text_align=ft.TextAlign.CENTER,
-                        weight=ft.FontWeight.W_600,
-                        color=INK,
-                    ),
-                    ft.IconButton(
-                        icon=ft.Icons.ADD,
-                        icon_size=17,
-                        icon_color=ACCENT,
-                        disabled=quantity >= cake.stock,
-                        tooltip="Adicionar uma unidade",
-                        on_click=lambda _: change(1),
-                    ),
-                ],
-                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                spacing=0,
-            ),
-            bgcolor=BACKGROUND,
-            border=ft.Border.all(1, BORDER),
-            border_radius=14,
-            padding=ft.Padding.symmetric(horizontal=4, vertical=1),
-        )
-
     def _cake_card(self, cake: Cake) -> ft.Control:
-        available = cake.stock > 0
-        status_text = (
-            f"{cake.stock} disponíveis" if available else "Esgotado no momento"
-        )
-        status_color = GREEN if available else MUTED
-        footer = (
-            self._quantity_control(cake)
-            if available
-            else ft.Container(
-                content=ft.Text(
-                    "Avise-me quando voltar",
-                    color=MUTED,
-                    size=12,
-                    weight=ft.FontWeight.W_500,
-                ),
-                alignment=ft.Alignment.CENTER,
-                border=ft.Border.all(1, BORDER),
-                border_radius=14,
-                padding=ft.Padding.symmetric(vertical=12),
-            )
-        )
-        return ft.Container(
-            col={"xs": 12, "sm": 6, "md": 4, "lg": 3},
-            content=ft.Container(
-                content=ft.Column(
-                    controls=[
-                        ft.Container(
-                            content=ft.Stack(
-                                controls=[
-                                    ft.Container(
-                                        expand=True,
-                                        alignment=ft.Alignment.CENTER,
-                                        content=ft.Icon(
-                                            ft.Icons.CAKE_OUTLINED,
-                                            size=58,
-                                            color=ACCENT,
-                                        ),
-                                    ),
-                                    ft.Container(
-                                        content=ft.Row(
-                                            controls=[
-                                                ft.Icon(
-                                                    ft.Icons.CIRCLE,
-                                                    size=8,
-                                                    color=status_color,
-                                                ),
-                                                ft.Text(
-                                                    status_text,
-                                                    size=11,
-                                                    weight=ft.FontWeight.W_600,
-                                                    color=status_color,
-                                                ),
-                                            ],
-                                            spacing=6,
-                                            tight=True,
-                                        ),
-                                        bgcolor=SURFACE,
-                                        border_radius=20,
-                                        padding=ft.Padding.symmetric(
-                                            horizontal=10, vertical=7
-                                        ),
-                                        right=12,
-                                        top=12,
-                                    ),
-                                ],
-                            ),
-                            height=158,
-                            bgcolor=cake.color,
-                            border_radius=16,
-                            clip_behavior=ft.ClipBehavior.HARD_EDGE,
-                        ),
-                        ft.Column(
-                            controls=[
-                                ft.Text(
-                                    cake.name,
-                                    size=18,
-                                    weight=ft.FontWeight.W_600,
-                                    color=INK,
-                                ),
-                                ft.Text(
-                                    cake.description,
-                                    size=13,
-                                    color=MUTED,
-                                    max_lines=2,
-                                    overflow=ft.TextOverflow.ELLIPSIS,
-                                ),
-                            ],
-                            spacing=6,
-                        ),
-                        ft.Container(expand=True),
-                        footer,
-                    ],
-                    spacing=14,
-                    expand=True,
-                ),
-                bgcolor=SURFACE,
-                border=ft.Border.all(1, BORDER),
-                border_radius=20,
-                padding=14,
-                height=342,
-                shadow=ft.BoxShadow(
-                    blur_radius=18,
-                    color="#12000000",
-                    offset=ft.Offset(0, 5),
-                ),
+        async def edit_item_type() -> None:
+            await self._open_item_type_form(item_type=cake)
+
+        return CatalogCardView(
+            cake,
+            quantity=self.controller.quantities[cake.id],
+            is_owner=self.is_owner,
+            on_quantity_change=lambda amount: self._change_cake_quantity(
+                cake.id, amount
             ),
-        )
+            on_edit=edit_item_type if self.is_owner else None,
+        ).build()
+
+    def _change_cake_quantity(self, cake_id: str, amount: int) -> None:
+        self.controller.change_quantity(cake_id, amount)
+        self.refresh()
+        self.page.update()
 
     def refresh(self) -> None:
         cakes = self.controller.filtered_cakes
-        self.catalog_grid.controls = [self._cake_card(cake) for cake in cakes]
+        self.catalog_grid.controls = [
+            self._cake_card(cake) for cake in cakes
+        ]
         self.results_label.value = (
             f"{len(cakes)} sabores no catálogo"
             if cakes
