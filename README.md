@@ -56,7 +56,7 @@ de service account no `.env` do cliente.
 
 ```powershell
 py -m venv .venv
-.\.venv\Scripts\python.exe -m pip install "flet>=1.1.2"
+.\.venv\Scripts\python.exe -m pip install "flet>=1.1.2" "tzdata>=2024.2"
 .\.venv\Scripts\flet.exe run --web
 ```
 

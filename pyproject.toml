@@ -8,7 +8,8 @@ authors = [
     { name = "Maphi Doces" }
 ]
 dependencies = [
-    "flet>=1.1.2"
+    "flet>=1.1.2",
+    "tzdata>=2024.2",
 ]
 
 [dependency-groups]
