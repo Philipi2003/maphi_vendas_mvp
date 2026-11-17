@@ -13,6 +13,10 @@ Incluído no MVP:
 - Autenticação de clientes e conta de dono.
 - Publicação e gerenciamento de itens pelo dono.
 - Reservas sem permitir que uma unidade seja reservada duas vezes.
+- Clientes não têm limite total de unidades em reservas ativas.
+- Cada documento de reserva contém até duas unidades; seleções maiores são
+  divididas em várias reservas para que as regras Firestore validem cada item.
+- Donos também podem criar reservas para vendas presenciais.
 
 Fora do escopo atual:
 
@@ -40,11 +44,19 @@ O projeto está modularizado por feature:
 - `src/features/auth/auth_view.py` e `auth_logic.py`: interface responsiva e estado demonstrativo da autenticação.
 - `src/features/auth/account_button_view.py`: botão “Entrar”/nome do usuário no cabeçalho, pertencente à feature de autenticação.
 
-O catálogo ainda usa dados de demonstração. Login, cadastro, login com Google e reservas ainda não fazem operações reais no Firebase. O estado atual de autenticação é apenas local: `set_authenticated_user(name)` atualiza o nome exibido, sem UID, token ou sessão Firebase.
+Autenticação, catálogo, estoque, locais de retirada e reservas estão conectados ao
+Firebase pelas APIs REST. A sessão salva o refresh token nas preferências do
+dispositivo; a senha não é persistida. Reservas criam, cancelam e finalizam
+unidades em transações Firestore, preservando o vínculo entre item e reserva.
+Clientes veem as próprias reservas; donos veem todas, filtram por local,
+cancelam, concluem vendas e removem reservas terminais. Ao remover um local, o
+app o desativa, cancela as reservas ativas e só então o exclui.
 
 O login/cadastro abre como tela dedicada em larguras menores que 768 px e como modal em telas maiores ou iguais a 768 px. O modal pode ser fechado clicando fora e possui botão de fechar; a tela de cadastro também possui botão de fechar.
 
-As regras atuais mantêm a criação/alteração de reservas bloqueada. Antes de ativar esse fluxo, implementar uma operação segura e atômica que proteja o estoque contra reservas duplicadas.
+As regras Firestore autorizam as transições da reserva e do estoque em conjunto.
+Elas devem ser publicadas no projeto Firebase antes de usar a funcionalidade em
+produção.
 
 ## Decisões de arquitetura e produto
 
@@ -56,12 +68,11 @@ As regras atuais mantêm a criação/alteração de reservas bloqueada. Antes de
 
 ## Próximos passos recomendados
 
-1. Integrar Firebase Authentication ao fluxo de login/cadastro, incluindo e-mail/senha e Google.
-2. Modelar sessão autenticada com os dados necessários (UID e token), carregar/criar o perfil `users/{uid}` e atualizar o botão de conta.
-3. Decidir e implementar o logout/menu de conta.
-4. Carregar os dados do catálogo do Firestore.
-5. Projetar a reserva com atualização atômica do estoque e só então habilitar as regras necessárias para criar reservas.
-6. Implementar a área do dono para publicar e gerenciar bolos.
+1. Publicar e validar as regras Firestore atualizadas no projeto Firebase.
+2. Confirmar que a conta do dono tem `users/{uid}.role == "DONO"` atribuído
+   administrativamente no Console do Firebase.
+3. Testar no ambiente Firebase de produção os fluxos de reserva, cancelamento,
+   conclusão da venda e exclusão de locais com reservas.
 
 ## Desenvolvimento local
 
