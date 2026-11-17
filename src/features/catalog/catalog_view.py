@@ -10,6 +10,7 @@ from app_config import (
     MUTED,
     SURFACE,
 )
+from features.catalog.catalog_api import CatalogApiError, fetch_catalog
 from features.catalog.catalog_logic import Cake, CatalogController
 
 
@@ -24,6 +25,8 @@ class CatalogView:
         self.page = page
         self.controller = controller
         self.on_reserve = on_reserve
+        self.loading = True
+        self.load_error: str | None = None
         self.filter_controls: dict[str, ft.Container] = {}
         self.results_label = ft.Text(color=MUTED, size=13)
         self.selection_label = ft.Text(
@@ -42,6 +45,10 @@ class CatalogView:
         )
         self.page.floating_action_button = self.reserve_button
         self.account_button = account_button
+        self.retry_button = ft.TextButton(
+            "Tentar novamente",
+            on_click=lambda _: self.page.run_task(self.load_catalog),
+        )
         self.search_field = ft.TextField(
             hint_text="Busque seu sabor favorito",
             prefix_icon=ft.Icons.SEARCH,
@@ -53,6 +60,22 @@ class CatalogView:
         )
         self.root = self._build_root()
         self.refresh()
+
+    async def load_catalog(self) -> None:
+        self.loading = True
+        self.load_error = None
+        self.refresh()
+        self.page.update()
+        try:
+            cakes = await fetch_catalog(self.page.pyodide)
+        except CatalogApiError as exc:
+            self.load_error = str(exc)
+        else:
+            self.controller.set_cakes(cakes)
+        finally:
+            self.loading = False
+            self.refresh()
+            self.page.update()
 
     def _build_root(self) -> ft.Control:
         for label in ("Todos", "Disponíveis", "Esgotados"):
@@ -345,6 +368,20 @@ class CatalogView:
                 padding=ft.Padding.symmetric(vertical=12),
             )
         )
+        cake_image = (
+            ft.Image(
+                src=cake.image_url,
+                width=158,
+                height=158,
+                fit=ft.BoxFit.COVER,
+            )
+            if cake.image_url
+            else ft.Icon(
+                ft.Icons.CAKE_OUTLINED,
+                size=58,
+                color=ACCENT,
+            )
+        )
         return ft.Container(
             col={"xs": 12, "sm": 6, "md": 4, "lg": 3},
             content=ft.Container(
@@ -356,11 +393,7 @@ class CatalogView:
                                     ft.Container(
                                         expand=True,
                                         alignment=ft.Alignment.CENTER,
-                                        content=ft.Icon(
-                                            ft.Icons.CAKE_OUTLINED,
-                                            size=58,
-                                            color=ACCENT,
-                                        ),
+                                        content=cake_image,
                                     ),
                                     ft.Container(
                                         content=ft.Row(
@@ -433,13 +466,46 @@ class CatalogView:
         )
 
     def refresh(self) -> None:
-        cakes = self.controller.filtered_cakes
-        self.catalog_grid.controls = [self._cake_card(cake) for cake in cakes]
-        self.results_label.value = (
-            f"{len(cakes)} sabores no catálogo"
-            if cakes
-            else "Nenhum sabor encontrado"
-        )
+        if self.loading:
+            self.results_label.value = "Carregando catálogo..."
+            self.catalog_grid.controls = [
+                ft.Container(
+                    col=12,
+                    content=ft.Row(
+                        controls=[ft.ProgressRing(width=22, height=22)],
+                        alignment=ft.MainAxisAlignment.CENTER,
+                    ),
+                    padding=24,
+                )
+            ]
+        elif self.load_error:
+            self.results_label.value = "Não foi possível carregar o catálogo."
+            self.catalog_grid.controls = [
+                ft.Container(
+                    col=12,
+                    content=ft.Column(
+                        controls=[
+                            ft.Text(self.load_error, color=MUTED, text_align=ft.TextAlign.CENTER),
+                            self.retry_button,
+                        ],
+                        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                        spacing=8,
+                    ),
+                    padding=24,
+                )
+            ]
+        else:
+            cakes = self.controller.filtered_cakes
+            self.catalog_grid.controls = [
+                self._cake_card(cake) for cake in cakes
+            ]
+            if cakes:
+                self.results_label.value = f"{len(cakes)} sabores no catálogo"
+            elif self.controller.cakes:
+                self.results_label.value = "Nenhum sabor encontrado"
+            else:
+                self.results_label.value = "Nenhum sabor disponível no momento"
+
         selected = self.controller.selected_count
         self.selection_label.value = (
             f"{selected} selecionado" if selected == 1 else f"{selected} selecionados"

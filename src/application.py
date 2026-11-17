@@ -31,6 +31,7 @@ class MaphiApplication:
             expand=True,
         )
         page.add(self.root)
+        page.run_task(self.catalog_view.load_catalog)
 
     def show_message(self, message: str) -> None:
         self.page.show_dialog(

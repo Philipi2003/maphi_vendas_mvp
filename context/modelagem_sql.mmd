@@ -1,0 +1,59 @@
+erDiagram
+    USERS {
+        UUID id PK
+        VARCHAR auth_uid UK
+        VARCHAR name
+        VARCHAR email UK
+        VARCHAR phone
+        VARCHAR role
+        TIMESTAMPTZ created_at
+    }
+
+    ITEM_TYPES {
+        UUID id PK
+        VARCHAR name
+        TEXT description
+        TEXT image_url
+        BOOLEAN is_custom_order_only
+        BOOLEAN is_active
+        TIMESTAMPTZ created_at
+    }
+
+    ITEMS {
+        UUID id PK
+        UUID item_type_id FK
+        VARCHAR status
+        TIMESTAMPTZ expiration_at
+        TIMESTAMPTZ created_at
+    }
+
+    PICKUP_SPOTS {
+        UUID id PK
+        VARCHAR name
+        TEXT address
+        TIMESTAMPTZ window_start
+        TIMESTAMPTZ window_end
+        BOOLEAN is_active
+        TIMESTAMPTZ created_at
+    }
+
+    RESERVATIONS {
+        UUID id PK
+        UUID user_id FK
+        UUID pickup_spot_id FK
+        VARCHAR sale_type
+        VARCHAR status
+        TIMESTAMPTZ created_at
+    }
+
+    RESERVATION_ITEMS {
+        UUID reservation_id PK, FK
+        UUID item_id PK, FK
+        VARCHAR item_type_name_snapshot
+    }
+
+    USERS ||--o{ RESERVATIONS : creates
+    PICKUP_SPOTS ||--o{ RESERVATIONS : receives
+    ITEM_TYPES ||--o{ ITEMS : classifies
+    RESERVATIONS ||--|{ RESERVATION_ITEMS : contains
+    ITEMS ||--o{ RESERVATION_ITEMS : appears_in

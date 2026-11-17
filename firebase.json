@@ -1,6 +1,17 @@
 {
-  "firestore": {
-    "rules": "firestore.rules"
+  "functions": {
+    "source": "functions",
+    "runtime": "python313",
+    "ignore": [
+      ".venv",
+      "venv",
+      "__pycache__",
+      "*.pyc",
+      ".env*",
+      ".secret.local",
+      ".pytest_cache",
+      "test_*.py"
+    ]
   },
   "hosting": {
     "public": "build/web",
@@ -10,6 +21,13 @@
       "**/node_modules/**"
     ],
     "rewrites": [
+      {
+        "source": "/api/**",
+        "function": {
+          "functionId": "api",
+          "region": "southamerica-east1"
+        }
+      },
       {
         "source": "**",
         "destination": "/index.html"

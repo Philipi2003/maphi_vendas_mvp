@@ -9,6 +9,7 @@ env/
 
 # Environments / secrets
 .env
+.secret.local
 
 # Tool caches
 .mypy_cache/

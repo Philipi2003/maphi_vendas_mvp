@@ -8,60 +8,23 @@ class Cake:
     description: str
     stock: int
     color: str
-
-
-SAMPLE_CAKES = [
-    Cake(
-        "brigadeiro",
-        "Brigadeiro",
-        "Massa fofinha de chocolate com cobertura cremosa.",
-        6,
-        "#F0E2D6",
-    ),
-    Cake(
-        "cenoura",
-        "Cenoura com chocolate",
-        "Bolo de cenoura caseiro com uma generosa camada de chocolate.",
-        3,
-        "#F4E9D5",
-    ),
-    Cake(
-        "ninho",
-        "Ninho com morango",
-        "Creme suave de leite em pó com morangos fresquinhos.",
-        0,
-        "#F3E4E6",
-    ),
-    Cake(
-        "limao",
-        "Limão",
-        "Leve, cítrico e coberto com um delicado merengue.",
-        0,
-        "#E9EEDC",
-    ),
-    Cake(
-        "churros",
-        "Churros",
-        "Canela e doce de leite em uma combinação irresistível.",
-        4,
-        "#F2E6D5",
-    ),
-    Cake(
-        "red-velvet",
-        "Red velvet",
-        "Massa aveludada com recheio cremoso de cream cheese.",
-        2,
-        "#F1E1DD",
-    ),
-]
+    image_url: str | None = None
 
 
 class CatalogController:
     def __init__(self, cakes: list[Cake] | None = None):
-        self.cakes = list(cakes if cakes is not None else SAMPLE_CAKES)
+        self.cakes = list(cakes if cakes is not None else [])
         self.quantities = {cake.id: 0 for cake in self.cakes}
         self.active_filter = "Todos"
         self.search_query = ""
+
+    def set_cakes(self, cakes: list[Cake]) -> None:
+        previous_quantities = self.quantities
+        self.cakes = list(cakes)
+        self.quantities = {
+            cake.id: min(cake.stock, previous_quantities.get(cake.id, 0))
+            for cake in self.cakes
+        }
 
     @property
     def selected_count(self) -> int:
