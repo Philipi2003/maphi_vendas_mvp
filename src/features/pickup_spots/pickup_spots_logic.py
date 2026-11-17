@@ -1,10 +1,9 @@
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import re
-import uuid
 from zoneinfo import ZoneInfo
 
-from firebase_rest import FirebaseFirestoreClient
+from maphi_api import MaphiApiClient
 
 LOCAL_TIMEZONE = ZoneInfo("America/Sao_Paulo")
 MINIMUM_PICKUP_WINDOW = timedelta(minutes=15)
@@ -22,7 +21,7 @@ class PickupSpot:
 
 class PickupSpotController:
     def __init__(self):
-        self.firestore_client = FirebaseFirestoreClient()
+        self.api_client = MaphiApiClient()
         self.pickup_spots: list[PickupSpot] = []
         self.selected_pickup_spot_id: str | None = None
 
@@ -61,40 +60,33 @@ class PickupSpotController:
     async def load_active_pickup_spots(
         self, id_token: str | None = None
     ) -> None:
-        rows = await self.firestore_client.list_pickup_spots(
+        rows = await self.api_client.list_pickup_spots(
             include_inactive=bool(id_token),
             id_token=id_token,
         )
         pickup_spots = []
-        seen_ids = set()
         for row in rows:
-            document = row.get("document")
-            if not document:
+            pickup_spot_id = str(row.get("id") or "")
+            if not pickup_spot_id:
                 continue
-            pickup_spot_id = document.get("name", "").rsplit("/", 1)[-1]
-            if not pickup_spot_id or pickup_spot_id in seen_ids:
-                continue
-            fields = document.get("fields", {})
-            name = fields.get("name", {}).get("stringValue", "")
+            name = row.get("name")
             if not name:
                 continue
             pickup_spots.append(
                 PickupSpot(
                     id=pickup_spot_id,
                     name=name,
-                    address=fields.get("address", {}).get("stringValue", ""),
+                    address=str(row.get("address") or ""),
                     arrival_at=self._decode_timestamp(
-                        fields.get("arrivalAt", {}).get("timestampValue")
+                        row.get("window_start")
                     ),
                     departure_at=self._decode_timestamp(
-                        fields.get("departureAt", {}).get("timestampValue")
+                        row.get("window_end")
                     ),
-                    is_active=fields.get("isActive", {}).get(
-                        "booleanValue", True
-                    ),
+                    is_active=bool(row.get("is_active", True)),
                 )
             )
-            seen_ids.add(pickup_spot_id)
+        seen_ids = {spot.id for spot in pickup_spots}
         self.pickup_spots = pickup_spots
         if self.selected_pickup_spot_id not in seen_ids:
             self.selected_pickup_spot_id = None
@@ -127,7 +119,7 @@ class PickupSpotController:
         id_token: str,
     ) -> PickupSpot:
         pickup_spot = self._build_pickup_spot(
-            id=uuid.uuid4().hex,
+            id="",
             name=name,
             address=address,
             arrival_at=arrival_at,
@@ -135,17 +127,13 @@ class PickupSpotController:
         )
         if not id_token:
             raise ValueError("Entre com uma conta de dono para criar o local.")
-        fields = self._firestore_fields(pickup_spot)
-        fields["createdAt"] = {
-            "timestampValue": datetime.now(timezone.utc)
-            .isoformat()
-            .replace("+00:00", "Z")
-        }
-        await self.firestore_client.create_pickup_spot(
-            pickup_spot.id, fields, id_token
+        row = await self.api_client.create_pickup_spot(
+            self._api_fields(pickup_spot),
+            id_token,
         )
-        self.pickup_spots.append(pickup_spot)
-        return pickup_spot
+        created = self._decode_row(row)
+        self.pickup_spots.append(created)
+        return created
 
     async def update_pickup_spot(
         self,
@@ -179,24 +167,12 @@ class PickupSpotController:
         )
         if not id_token:
             raise ValueError("Entre com uma conta de dono para editar o local.")
-        fields = self._firestore_fields(updated)
-        fields["isActive"] = {"booleanValue": existing.is_active}
-        await self.firestore_client.update_document(
-            "pickupSpots",
+        row = await self.api_client.update_pickup_spot(
             pickup_spot_id,
-            fields,
-            [
-                "name",
-                "address",
-                "arrivalAt",
-                "departureAt",
-                "arrivalTime",
-                "departureTime",
-                "timeWindow",
-                "isActive",
-            ],
+            self._api_fields(updated),
             id_token,
         )
+        updated = self._decode_row(row)
         self.pickup_spots[self.pickup_spots.index(existing)] = updated
         return updated
 
@@ -211,9 +187,7 @@ class PickupSpotController:
         )
         if existing is None:
             raise ValueError("O local de retirada não foi encontrado.")
-        await self.firestore_client.delete_document(
-            "pickupSpots", pickup_spot_id, id_token
-        )
+        await self.api_client.delete_pickup_spot(pickup_spot_id, id_token)
         self.pickup_spots.remove(existing)
         if self.selected_pickup_spot_id == pickup_spot_id:
             self.selected_pickup_spot_id = None
@@ -231,11 +205,9 @@ class PickupSpotController:
             raise ValueError("O local de retirada não foi encontrado.")
         if not existing.is_active:
             return
-        await self.firestore_client.update_document(
-            "pickupSpots",
+        await self.api_client.update_pickup_spot(
             pickup_spot_id,
-            {"isActive": {"booleanValue": False}},
-            ["isActive"],
+            {"is_active": False},
             id_token,
         )
         self.pickup_spots[self.pickup_spots.index(existing)] = replace(
@@ -306,26 +278,31 @@ class PickupSpotController:
         return timestamp.astimezone(LOCAL_TIMEZONE)
 
     @staticmethod
-    def _firestore_fields(pickup_spot: PickupSpot) -> dict:
+    def _api_fields(pickup_spot: PickupSpot) -> dict[str, object]:
         if pickup_spot.arrival_at is None or pickup_spot.departure_at is None:
             raise ValueError("O local precisa ter datas e horários completos.")
         return {
-            "name": {"stringValue": pickup_spot.name},
-            "address": {"stringValue": pickup_spot.address},
-            "arrivalAt": {
-                "timestampValue": pickup_spot.arrival_at.astimezone(timezone.utc)
-                .isoformat()
-                .replace("+00:00", "Z")
-            },
-            "departureAt": {
-                "timestampValue": pickup_spot.departure_at.astimezone(
-                    timezone.utc
-                )
-                .isoformat()
-                .replace("+00:00", "Z")
-            },
-            "isActive": {"booleanValue": pickup_spot.is_active},
+            "name": pickup_spot.name,
+            "address": pickup_spot.address,
+            "window_start": pickup_spot.arrival_at.astimezone(
+                timezone.utc
+            ).isoformat().replace("+00:00", "Z"),
+            "window_end": pickup_spot.departure_at.astimezone(
+                timezone.utc
+            ).isoformat().replace("+00:00", "Z"),
+            "is_active": pickup_spot.is_active,
         }
+
+    @classmethod
+    def _decode_row(cls, row: dict) -> PickupSpot:
+        return PickupSpot(
+            id=str(row["id"]),
+            name=str(row.get("name") or ""),
+            address=str(row.get("address") or ""),
+            arrival_at=cls._decode_timestamp(row.get("window_start")),
+            departure_at=cls._decode_timestamp(row.get("window_end")),
+            is_active=bool(row.get("is_active", True)),
+        )
 
     @staticmethod
     def _has_valid_window(pickup_spot: PickupSpot) -> bool:

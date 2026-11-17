@@ -5,7 +5,29 @@ import flet as ft
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-ENV_PATHS = (BASE_DIR / ".env", Path(__file__).resolve().parent / ".env")
+FUNCTIONS_ENV_PATH = BASE_DIR / "functions" / ".env"
+ENV_PATHS = (
+    BASE_DIR / ".env",
+    FUNCTIONS_ENV_PATH,
+    Path(__file__).resolve().parent / ".env",
+)
+FIREBASE_CONFIG_ALIASES = {
+    "apiKey": "FIREBASE_API_KEY",
+    "authDomain": "AUTH_DOMAIN",
+    "projectId": "PROJECT_ID",
+    "storageBucket": "STORAGE_BUCKET",
+    "messagingSenderId": "MESSAGING_SENDER_ID",
+    "appId": "APP_ID",
+    "measurementId": "MEASUREMENT_ID",
+    "MAPHI_FIREBASE_API_KEY": "FIREBASE_API_KEY",
+    "MAPHI_AUTH_DOMAIN": "AUTH_DOMAIN",
+    "MAPHI_PROJECT_ID": "PROJECT_ID",
+    "MAPHI_STORAGE_BUCKET": "STORAGE_BUCKET",
+    "MAPHI_MESSAGING_SENDER_ID": "MESSAGING_SENDER_ID",
+    "MAPHI_APP_ID": "APP_ID",
+    "MAPHI_MEASUREMENT_ID": "MEASUREMENT_ID",
+}
+PUBLIC_FIREBASE_CONFIG_KEYS = frozenset(FIREBASE_CONFIG_ALIASES.values())
 
 
 def _load_env_file() -> None:
@@ -25,6 +47,12 @@ def _load_env_file() -> None:
             key, value = line.split(separator, 1)
             key = key.strip()
             value = value.strip().strip('"').strip("'")
+            key = FIREBASE_CONFIG_ALIASES.get(key, key)
+            if (
+                env_path == FUNCTIONS_ENV_PATH
+                and key not in PUBLIC_FIREBASE_CONFIG_KEYS
+            ):
+                continue
             if key:
                 os.environ.setdefault(key, value)
 

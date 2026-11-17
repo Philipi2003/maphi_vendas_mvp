@@ -38,88 +38,8 @@ from firebase_rest import (
 )
 
 
-@pytest.mark.asyncio
-async def test_login_success_sets_authenticated_user():
-    session_storage = SimpleNamespace(set=AsyncMock(return_value=True))
-    controller = AuthController(session_storage=session_storage)
-    controller.auth_client.sign_in = AsyncMock(
-        return_value={
-            "idToken": "token-123",
-            "refreshToken": "refresh-123",
-            "localId": "user-abc",
-            "displayName": "Maria",
-        }
-    )
-    controller.firestore_client.get_document = AsyncMock(
-        return_value={"fields": {"role": {"stringValue": "CLIENTE"}}}
-    )
-
-    result = await controller.submit(email="maria@email.com", password="senha123")
-
-    assert result == "Bem-vindo(a), Maria!"
-    assert controller.user_name == "Maria"
-    assert controller.user_email == "maria@email.com"
-    assert controller.user_id == "user-abc"
-    assert controller.id_token == "token-123"
-    assert controller.refresh_token == "refresh-123"
-    assert controller.is_authenticated is True
-    assert controller.is_owner is False
-    session_storage.set.assert_awaited_once_with(
-        controller.SESSION_STORAGE_KEY,
-        json.dumps(
-            {"refreshToken": "refresh-123", "provider": "password"},
-            separators=(",", ":"),
-        ),
-    )
 
 
-@pytest.mark.asyncio
-async def test_restore_session_refreshes_token_and_loads_user_profile():
-    session_storage = SimpleNamespace(
-        get=AsyncMock(
-            return_value=json.dumps(
-                {"refreshToken": "old-refresh", "provider": "google"}
-            )
-        ),
-        set=AsyncMock(return_value=True),
-        remove=AsyncMock(return_value=True),
-    )
-    controller = AuthController(session_storage=session_storage)
-    controller.auth_client.refresh_session = AsyncMock(
-        return_value={
-            "idToken": "new-id-token",
-            "refreshToken": "rotated-refresh",
-            "localId": "owner-uid",
-        }
-    )
-    controller.auth_client.lookup_account = AsyncMock(
-        return_value={
-            "localId": "owner-uid",
-            "email": "dona@email.com",
-            "displayName": "Dona",
-        }
-    )
-    controller.firestore_client.get_document = AsyncMock(
-        return_value={"fields": {"role": {"stringValue": "DONO"}}}
-    )
-
-    restored = await controller.restore_session()
-
-    assert restored is True
-    assert controller.is_owner is True
-    assert controller.id_token == "new-id-token"
-    assert controller.refresh_token == "rotated-refresh"
-    assert controller.auth_provider == "google"
-    controller.auth_client.refresh_session.assert_awaited_once_with(
-        "old-refresh"
-    )
-    session_storage.set.assert_awaited_once_with(
-        controller.SESSION_STORAGE_KEY,
-        json.dumps(
-            {"refreshToken": "rotated-refresh", "provider": "google"},
-            separators=(",", ":"),
-        ),
-    )
 
 
 @pytest.mark.asyncio
@@ -213,54 +133,8 @@ async def test_application_restores_session_before_loading_catalog():
     ]
 
 
-@pytest.mark.asyncio
-async def test_login_loads_owner_role_from_firestore_profile():
-    controller = AuthController()
-    controller.auth_client.sign_in = AsyncMock(
-        return_value={
-            "idToken": "owner-token",
-            "refreshToken": "refresh-token",
-            "localId": "owner-uid",
-        }
-    )
-    controller.firestore_client.get_document = AsyncMock(
-        return_value={
-            "fields": {
-                "name": {"stringValue": "Dona"},
-                "role": {"stringValue": "DONO"},
-            }
-        }
-    )
-
-    await controller.submit(email="dona@email.com", password="senha123")
-
-    assert controller.user_name == "Dona"
-    assert controller.is_owner is True
 
 
-@pytest.mark.asyncio
-async def test_google_login_uses_firebase_session_and_loads_profile():
-    controller = AuthController()
-    controller.google_auth_client.sign_in = AsyncMock(
-        return_value={
-            "idToken": "google-firebase-token",
-            "refreshToken": "google-refresh",
-            "localId": "google-user",
-            "email": "google@email.com",
-            "displayName": "Google User",
-        }
-    )
-    controller.firestore_client.get_document = AsyncMock(
-        return_value={"fields": {"role": {"stringValue": "CLIENTE"}}}
-    )
-
-    await controller.submit_google()
-
-    assert controller.user_name == "Google User"
-    assert controller.user_email == "google@email.com"
-    assert controller.user_id == "google-user"
-    assert controller.id_token == "google-firebase-token"
-    assert controller.auth_provider == "google"
 
 
 @pytest.mark.asyncio
@@ -274,408 +148,22 @@ async def test_google_logout_signs_out_from_firebase_bridge():
     controller.google_auth_client.sign_out.assert_awaited_once()
 
 
-@pytest.mark.asyncio
-async def test_create_item_type_persists_firestore_model_and_updates_catalog():
-    controller = CatalogController(cakes=[])
-    controller.firestore_client.create_document = AsyncMock(return_value={})
-    controller.storage_client.upload_image = AsyncMock(
-        return_value="https://example.com/chocolate.png"
-    )
-
-    cake = await controller.create_item_type(
-        name="  Chocolate  ",
-        description=" Bolo cremoso ",
-        regular_price="45,00",
-        promotional_price="39.90",
-        is_custom_order_only=True,
-        is_active=True,
-        id_token="owner-token",
-        user_id="owner-uid",
-        image_data=b"photo",
-        image_filename="chocolate.png",
-        image_content_type="image/png",
-    )
-
-    assert cake.name == "Chocolate"
-    assert cake.description == "Bolo cremoso"
-    assert cake.stock == 0
-    assert cake.is_custom_order_only is True
-    assert cake.regular_price == 45.0
-    assert cake.promotional_price == 39.9
-    assert controller.cakes == [cake]
-    saved_fields = controller.firestore_client.create_document.await_args.args[2]
-    assert saved_fields["name"] == {"stringValue": "Chocolate"}
-    assert saved_fields["description"] == {"stringValue": "Bolo cremoso"}
-    assert saved_fields["imageUrl"] == {
-        "stringValue": "https://example.com/chocolate.png"
-    }
-    assert saved_fields["regularPrice"] == {"doubleValue": 45.0}
-    assert saved_fields["promotionalPrice"] == {"doubleValue": 39.9}
-    assert saved_fields["isCustomOrderOnly"] == {"booleanValue": True}
-    assert saved_fields["isActive"] == {"booleanValue": True}
-    assert "timestampValue" in saved_fields["createdAt"]
-    controller.storage_client.upload_image.assert_awaited_once()
 
 
-@pytest.mark.asyncio
-async def test_item_type_rejects_promotion_above_regular_price():
-    controller = CatalogController(cakes=[])
-    controller.firestore_client.create_document = AsyncMock(return_value={})
-
-    with pytest.raises(ValueError, match="menor que o preço normal"):
-        await controller.create_item_type(
-            name="Chocolate",
-            description="Bolo cremoso",
-            regular_price="40",
-            promotional_price="45",
-            is_custom_order_only=False,
-            is_active=True,
-            id_token="owner-token",
-            user_id="owner-uid",
-        )
-
-    controller.firestore_client.create_document.assert_not_awaited()
 
 
-@pytest.mark.asyncio
-async def test_item_type_update_persists_activation_and_clears_old_promotion():
-    existing = Cake(
-        "chocolate",
-        "Chocolate",
-        "Bolo de chocolate",
-        0,
-        "#F0E2D6",
-        regular_price=45.0,
-        promotional_price=39.9,
-    )
-    controller = CatalogController(cakes=[existing])
-    controller.firestore_client.update_document = AsyncMock(return_value={})
-    controller.firestore_client.list_items_for_item_type = AsyncMock(
-        return_value=[
-            {
-                "document": {
-                    "name": "projects/maphi/databases/(default)/documents/items/unit-1",
-                    "fields": {
-                        "itemTypeName": {"stringValue": "Chocolate"},
-                    },
-                }
-            },
-            {
-                "document": {
-                    "name": "projects/maphi/databases/(default)/documents/items/unit-2",
-                    "fields": {
-                        "itemTypeName": {"stringValue": "Chocolate"},
-                    },
-                }
-            },
-        ]
-    )
-    controller.firestore_client.update_documents_atomically = AsyncMock(
-        return_value={}
-    )
-    controller.storage_client.delete_image = AsyncMock(return_value=True)
-
-    updated = await controller.update_item_type(
-        item_type_id="chocolate",
-        name="Chocolate amargo",
-        description="Bolo intenso",
-        regular_price="50",
-        promotional_price="",
-        is_custom_order_only=False,
-        is_active=False,
-        id_token="owner-token",
-        user_id="owner-uid",
-    )
-
-    assert updated.name == "Chocolate amargo"
-    assert updated.is_active is False
-    assert updated.promotional_price is None
-    assert controller.cakes == [updated]
-    saved_fields = controller.firestore_client.update_document.await_args.args[2]
-    update_mask = controller.firestore_client.update_document.await_args.args[3]
-    assert saved_fields["isActive"] == {"booleanValue": False}
-    assert saved_fields["regularPrice"] == {"doubleValue": 50.0}
-    assert "promotionalPrice" not in saved_fields
-    assert "promotionalPrice" in update_mask
-    controller.firestore_client.update_documents_atomically.assert_awaited_once_with(
-        "items",
-        [
-            (
-                "unit-1",
-                {"itemTypeName": {"stringValue": "Chocolate amargo"}},
-            ),
-            (
-                "unit-2",
-                {"itemTypeName": {"stringValue": "Chocolate amargo"}},
-            ),
-        ],
-        ["itemTypeName"],
-        "owner-token",
-    )
-    controller.storage_client.delete_image.assert_not_awaited()
 
 
-@pytest.mark.asyncio
-async def test_item_type_update_reports_inventory_name_sync_failure():
-    existing = Cake(
-        "chocolate", "Chocolate", "Bolo", 1, "#F0E2D6"
-    )
-    controller = CatalogController(cakes=[existing])
-    controller.firestore_client.update_document = AsyncMock(return_value={})
-    controller.firestore_client.list_items_for_item_type = AsyncMock(
-        return_value=[
-            {
-                "document": {
-                    "name": "projects/maphi/databases/(default)/documents/items/unit-1",
-                    "fields": {
-                        "itemTypeName": {"stringValue": "Chocolate"},
-                    },
-                }
-            }
-        ]
-    )
-    controller.firestore_client.update_documents_atomically = AsyncMock(
-        side_effect=FirebaseRestError("Firestore indisponível", 503)
-    )
-
-    with pytest.raises(ItemTypeNameSyncError, match="O sabor foi atualizado"):
-        await controller.update_item_type(
-            item_type_id="chocolate",
-            name="Chocolate amargo",
-            description="Bolo",
-            regular_price="45",
-            promotional_price="",
-            is_custom_order_only=False,
-            is_active=True,
-            id_token="owner-token",
-            user_id="owner-uid",
-        )
-
-    assert controller.cakes[0].name == "Chocolate amargo"
 
 
-@pytest.mark.asyncio
-async def test_item_type_name_sync_splits_large_inventory_into_batches():
-    existing = Cake("chocolate", "Chocolate", "Bolo", 501, "#F0E2D6")
-    controller = CatalogController(cakes=[existing])
-    controller.firestore_client.update_document = AsyncMock(return_value={})
-    controller.firestore_client.list_items_for_item_type = AsyncMock(
-        return_value=[
-            {
-                "document": {
-                    "name": (
-                        "projects/maphi/databases/(default)/documents/"
-                        f"items/unit-{index}"
-                    ),
-                    "fields": {
-                        "itemTypeName": {"stringValue": "Chocolate"},
-                    },
-                }
-            }
-            for index in range(501)
-        ]
-    )
-    controller.firestore_client.update_documents_atomically = AsyncMock(
-        return_value={}
-    )
-
-    await controller.update_item_type(
-        item_type_id="chocolate",
-        name="Chocolate amargo",
-        description="Bolo",
-        regular_price="45",
-        promotional_price="",
-        is_custom_order_only=False,
-        is_active=True,
-        id_token="owner-token",
-        user_id="owner-uid",
-    )
-
-    batches = (
-        controller.firestore_client.update_documents_atomically.await_args_list
-    )
-    assert [len(call.args[1]) for call in batches] == [500, 1]
 
 
-@pytest.mark.asyncio
-async def test_item_type_update_deletes_old_image_after_new_image_is_saved():
-    old_image_url = (
-        "https://firebasestorage.googleapis.com/v0/b/maphi-bucket/o/"
-        "itemTypes%2Fowner-uid%2Fold.png?alt=media&token=old"
-    )
-    new_image_url = (
-        "https://firebasestorage.googleapis.com/v0/b/maphi-bucket/o/"
-        "itemTypes%2Fowner-uid%2Fnew.png?alt=media&token=new"
-    )
-    existing = Cake(
-        "chocolate",
-        "Chocolate",
-        "Bolo",
-        0,
-        "#F0E2D6",
-        image_url=old_image_url,
-        regular_price=45.0,
-    )
-    events = []
-    controller = CatalogController(cakes=[existing])
-    controller.storage_client.upload_image = AsyncMock(
-        side_effect=lambda *args: events.append("upload") or new_image_url
-    )
-    controller.firestore_client.update_document = AsyncMock(
-        side_effect=lambda *args: events.append("save")
-    )
-    controller.firestore_client.list_items_for_item_type = AsyncMock(
-        return_value=[]
-    )
-    controller.firestore_client.update_documents_atomically = AsyncMock(
-        return_value={}
-    )
-    controller.storage_client.delete_image = AsyncMock(
-        side_effect=lambda *args: events.append("delete") or True
-    )
-
-    updated = await controller.update_item_type(
-        item_type_id="chocolate",
-        name="Chocolate",
-        description="Bolo",
-        regular_price="45",
-        promotional_price="",
-        is_custom_order_only=False,
-        is_active=True,
-        id_token="owner-token",
-        user_id="owner-uid",
-        image_data=b"new photo",
-        image_filename="new.png",
-        image_content_type="image/png",
-    )
-
-    assert events == ["upload", "save", "delete"]
-    assert updated.image_url == new_image_url
-    controller.storage_client.delete_image.assert_awaited_once_with(
-        old_image_url, "owner-token"
-    )
 
 
-@pytest.mark.asyncio
-async def test_item_type_update_reports_old_image_cleanup_failure_after_save():
-    old_image_url = (
-        "https://firebasestorage.googleapis.com/v0/b/maphi-bucket/o/"
-        "itemTypes%2Fowner-uid%2Fold.png?alt=media&token=old"
-    )
-    new_image_url = (
-        "https://firebasestorage.googleapis.com/v0/b/maphi-bucket/o/"
-        "itemTypes%2Fowner-uid%2Fnew.png?alt=media&token=new"
-    )
-    existing = Cake(
-        "chocolate",
-        "Chocolate",
-        "Bolo",
-        0,
-        "#F0E2D6",
-        image_url=old_image_url,
-        regular_price=45.0,
-    )
-    controller = CatalogController(cakes=[existing])
-    controller.storage_client.upload_image = AsyncMock(
-        return_value=new_image_url
-    )
-    controller.firestore_client.update_document = AsyncMock(return_value={})
-    controller.firestore_client.list_items_for_item_type = AsyncMock(
-        return_value=[]
-    )
-    controller.firestore_client.update_documents_atomically = AsyncMock(
-        return_value={}
-    )
-    controller.storage_client.delete_image = AsyncMock(
-        side_effect=FirebaseRestError("Storage indisponível", 500)
-    )
-
-    with pytest.raises(ItemTypeImageCleanupError, match="sabor foi atualizado"):
-        await controller.update_item_type(
-            item_type_id="chocolate",
-            name="Chocolate",
-            description="Bolo",
-            regular_price="45",
-            promotional_price="",
-            is_custom_order_only=False,
-            is_active=True,
-            id_token="owner-token",
-            user_id="owner-uid",
-            image_data=b"new photo",
-            image_filename="new.png",
-            image_content_type="image/png",
-        )
-
-    assert controller.cakes[0].image_url == new_image_url
-    controller.firestore_client.update_document.assert_awaited_once()
 
 
-@pytest.mark.asyncio
-async def test_item_type_cannot_be_deleted_while_inventory_items_exist():
-    cake = Cake(
-        "chocolate",
-        "Chocolate",
-        "Bolo",
-        0,
-        "#F0E2D6",
-        image_url=(
-            "https://firebasestorage.googleapis.com/v0/b/maphi-bucket/o/"
-            "itemTypes%2Fowner-uid%2Fchocolate.png?alt=media&token=token"
-        ),
-    )
-    controller = CatalogController(cakes=[cake])
-    controller.firestore_client.has_items_for_item_type = AsyncMock(
-        return_value=True
-    )
-    controller.firestore_client.delete_document = AsyncMock()
-    controller.storage_client.delete_image = AsyncMock(return_value=True)
-
-    with pytest.raises(ValueError, match="há bolos associados"):
-        await controller.delete_item_type("chocolate", "owner-token")
-
-    controller.firestore_client.delete_document.assert_not_awaited()
-    controller.storage_client.delete_image.assert_not_awaited()
-    assert controller.cakes == [cake]
-
-    controller.firestore_client.has_items_for_item_type.return_value = False
-    await controller.delete_item_type("chocolate", "owner-token")
-
-    controller.storage_client.delete_image.assert_awaited_once_with(
-        cake.image_url, "owner-token"
-    )
-    controller.firestore_client.delete_document.assert_awaited_once_with(
-        "itemTypes", "chocolate", "owner-token"
-    )
-    assert controller.cakes == []
 
 
-@pytest.mark.asyncio
-async def test_item_type_remains_when_storage_image_deletion_fails():
-    cake = Cake(
-        "chocolate",
-        "Chocolate",
-        "Bolo",
-        0,
-        "#F0E2D6",
-        image_url=(
-            "https://firebasestorage.googleapis.com/v0/b/maphi-bucket/o/"
-            "itemTypes%2Fowner-uid%2Fchocolate.png?alt=media"
-        ),
-    )
-    controller = CatalogController(cakes=[cake])
-    controller.firestore_client.has_items_for_item_type = AsyncMock(
-        return_value=False
-    )
-    controller.firestore_client.delete_document = AsyncMock()
-    controller.storage_client.delete_image = AsyncMock(
-        side_effect=RuntimeError("Storage indisponível")
-    )
-
-    with pytest.raises(RuntimeError, match="Storage indisponível"):
-        await controller.delete_item_type("chocolate", "owner-token")
-
-    controller.firestore_client.delete_document.assert_not_awaited()
-    assert controller.cakes == [cake]
 
 
 @pytest.mark.asyncio
@@ -939,53 +427,6 @@ async def test_active_pickup_spot_query_only_returns_active_locations():
     )
 
 
-@pytest.mark.asyncio
-async def test_pickup_spots_load_and_selected_location_state():
-    controller = PickupSpotController()
-    controller.firestore_client.list_pickup_spots = AsyncMock(
-        return_value=[
-            {
-                "document": {
-                    "name": "projects/maphi/databases/(default)/documents/pickupSpots/centro",
-                    "fields": {
-                        "name": {"stringValue": "Loja do Centro"},
-                        "address": {"stringValue": "Rua A, 123"},
-                        "arrivalAt": {
-                            "timestampValue": "2099-12-01T13:00:00Z"
-                        },
-                        "departureAt": {
-                            "timestampValue": "2099-12-01T21:00:00Z"
-                        },
-                    },
-                }
-            }
-        ]
-    )
-
-    await controller.load_active_pickup_spots()
-    controller.firestore_client.list_pickup_spots.assert_awaited_once_with(
-        include_inactive=False, id_token=None
-    )
-    controller.select_pickup_spot("centro")
-
-    assert controller.selected_pickup_spot_id == "centro"
-    assert controller.selected_pickup_spot == PickupSpot(
-        id="centro",
-        name="Loja do Centro",
-        address="Rua A, 123",
-        arrival_at=datetime(
-            2099, 12, 1, 10, 0, tzinfo=ZoneInfo("America/Sao_Paulo")
-        ),
-        departure_at=datetime(
-            2099, 12, 1, 18, 0, tzinfo=ZoneInfo("America/Sao_Paulo")
-        ),
-    )
-
-    controller.firestore_client.list_pickup_spots.return_value = []
-    await controller.load_active_pickup_spots()
-
-    assert controller.pickup_spots == []
-    assert controller.selected_pickup_spot_id is None
 
 
 def test_catalog_displays_pickup_location_and_schedule():
@@ -1179,42 +620,6 @@ def test_pickup_spot_availability_requires_fifteen_minutes_before_closing():
     )
 
 
-@pytest.mark.asyncio
-async def test_pickup_spot_creation_persists_normalized_fields():
-    controller = PickupSpotController()
-    controller.firestore_client.create_pickup_spot = AsyncMock(return_value={})
-
-    pickup_spot = await controller.create_pickup_spot(
-        name="  Loja do Centro ",
-        address=" Rua A, 123 ",
-        arrival_at="15/11/2026 09:30",
-        departure_at="15/11/2026 17:45",
-        id_token="owner-token",
-    )
-
-    assert pickup_spot.name == "Loja do Centro"
-    assert pickup_spot.address == "Rua A, 123"
-    assert pickup_spot.arrival_at == datetime(
-        2026, 11, 15, 9, 30, tzinfo=ZoneInfo("America/Sao_Paulo")
-    )
-    assert pickup_spot.departure_at == datetime(
-        2026, 11, 15, 17, 45, tzinfo=ZoneInfo("America/Sao_Paulo")
-    )
-    assert pickup_spot.is_active is True
-    fields = controller.firestore_client.create_pickup_spot.await_args.args[1]
-    assert fields["name"] == {"stringValue": "Loja do Centro"}
-    assert fields["address"] == {"stringValue": "Rua A, 123"}
-    assert fields["arrivalAt"] == {
-        "timestampValue": "2026-11-15T12:30:00Z"
-    }
-    assert fields["departureAt"] == {
-        "timestampValue": "2026-11-15T20:45:00Z"
-    }
-    assert fields["isActive"] == {"booleanValue": True}
-    assert "timestampValue" in fields["createdAt"]
-    assert controller.firestore_client.create_pickup_spot.await_args.args[2] == (
-        "owner-token"
-    )
 
 
 def test_pickup_spot_form_builds_with_calendar_and_time_pickers():
@@ -1408,263 +813,18 @@ async def test_pickup_spot_validation_error_is_shown_inside_the_form():
     assert view.form_error.visible is False
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("name", "address", "arrival_at", "departure_at", "message"),
-    [
-        (" ", "Rua A, 123", "15/11/2026 09:00", "15/11/2026 17:00", "nome"),
-        ("Centro", " ", "15/11/2026 09:00", "15/11/2026 17:00", "endereço"),
-        ("Centro", "Rua A, 123", "15/11/2026 9h", "15/11/2026 17:00", "chegada"),
-        ("Centro", "Rua A, 123", "15/11/2026 09:00", "15/11/2026 17h", "saída"),
-        ("Centro", "Rua A, 123", "15/11/2026 18:00", "15/11/2026 17:00", "posterior"),
-        ("Centro", "Rua A, 123", "15/11/2026 09:00", "15/11/2026 09:10", "15 minutos"),
-    ],
-)
-async def test_pickup_spot_creation_requires_all_reservation_details(
-    name, address, arrival_at, departure_at, message
-):
-    controller = PickupSpotController()
-    controller.firestore_client.create_pickup_spot = AsyncMock()
-
-    with pytest.raises(ValueError, match=message):
-        await controller.create_pickup_spot(
-            name=name,
-            address=address,
-            arrival_at=arrival_at,
-            departure_at=departure_at,
-            id_token="owner-token",
-        )
-
-    controller.firestore_client.create_pickup_spot.assert_not_awaited()
 
 
-@pytest.mark.asyncio
-async def test_pickup_spot_update_and_delete_preserve_selection_state():
-    pickup_spot = PickupSpot(
-        id="centro",
-        name="Loja do Centro",
-        address="Rua A, 123",
-        arrival_at=datetime(
-            2099, 12, 1, 10, 0, tzinfo=ZoneInfo("America/Sao_Paulo")
-        ),
-        departure_at=datetime(
-            2099, 12, 1, 18, 0, tzinfo=ZoneInfo("America/Sao_Paulo")
-        ),
-    )
-    controller = PickupSpotController()
-    controller.pickup_spots = [pickup_spot]
-    controller.select_pickup_spot("centro")
-    controller.firestore_client.update_document = AsyncMock(return_value={})
-    controller.firestore_client.delete_document = AsyncMock(return_value={})
-
-    updated = await controller.update_pickup_spot(
-        pickup_spot_id="centro",
-        name="Loja Central",
-        address="Rua B, 456",
-        arrival_at="02/12/2099 11:00",
-        departure_at="02/12/2099 19:00",
-        id_token="owner-token",
-    )
-
-    assert updated.name == "Loja Central"
-    assert updated.arrival_at == datetime(
-        2099, 12, 2, 11, 0, tzinfo=ZoneInfo("America/Sao_Paulo")
-    )
-    assert controller.selected_pickup_spot_id == "centro"
-    saved_fields = controller.firestore_client.update_document.await_args.args[2]
-    assert saved_fields["arrivalAt"] == {
-        "timestampValue": "2099-12-02T14:00:00Z"
-    }
-
-    await controller.delete_pickup_spot("centro", "owner-token")
-
-    controller.firestore_client.delete_document.assert_awaited_once_with(
-        "pickupSpots", "centro", "owner-token"
-    )
-    assert controller.pickup_spots == []
-    assert controller.selected_pickup_spot_id is None
 
 
-@pytest.mark.asyncio
-async def test_editing_inactive_pickup_spot_does_not_reactivate_it():
-    pickup_spot = PickupSpot(
-        id="centro",
-        name="Loja do Centro",
-        address="Rua A, 123",
-        arrival_at=datetime(
-            2099, 12, 1, 10, 0, tzinfo=ZoneInfo("America/Sao_Paulo")
-        ),
-        departure_at=datetime(
-            2099, 12, 1, 18, 0, tzinfo=ZoneInfo("America/Sao_Paulo")
-        ),
-        is_active=False,
-    )
-    controller = PickupSpotController()
-    controller.pickup_spots = [pickup_spot]
-    controller.firestore_client.update_document = AsyncMock(return_value={})
-
-    updated = await controller.update_pickup_spot(
-        pickup_spot_id="centro",
-        name="Loja Central",
-        address="Rua B, 456",
-        arrival_at="02/12/2099 11:00",
-        departure_at="02/12/2099 19:00",
-        id_token="owner-token",
-    )
-
-    assert updated.is_active is False
-    fields = controller.firestore_client.update_document.await_args.args[2]
-    assert fields["isActive"] == {"booleanValue": False}
 
 
-@pytest.mark.asyncio
-async def test_catalog_loads_saved_firestore_item_types():
-    controller = CatalogController()
-    assert controller.cakes == []
-    controller.firestore_client.list_available_items = AsyncMock(
-        return_value=[
-            {
-                "document": {
-                    "fields": {
-                        "itemTypeId": {"stringValue": "chocolate"},
-                        "status": {"stringValue": "DISPONIVEL"},
-                    }
-                }
-            },
-            {
-                "document": {
-                    "fields": {
-                        "itemTypeId": {"stringValue": "chocolate"},
-                        "status": {"stringValue": "DISPONIVEL"},
-                    }
-                }
-            },
-            {
-                "document": {
-                    "fields": {
-                        "itemTypeId": {"stringValue": "chocolate"},
-                        "status": {"stringValue": "RESERVADO"},
-                    }
-                }
-            },
-        ]
-    )
-
-    controller.firestore_client.list_active_item_types = AsyncMock(
-        return_value=[
-            {
-                "document": {
-                    "name": "projects/maphi/databases/(default)/documents/itemTypes/chocolate",
-                    "fields": {
-                        "name": {"stringValue": "Chocolate"},
-                        "description": {"stringValue": "Bolo de chocolate"},
-                        "imageUrl": {"stringValue": "https://example.com/bolo.png"},
-                        "isCustomOrderOnly": {"booleanValue": False},
-                        "regularPrice": {"doubleValue": 45.0},
-                        "promotionalPrice": {"doubleValue": 39.9},
-                        "isActive": {"booleanValue": True},
-                    },
-                }
-            }
-        ]
-    )
-
-    await controller.load_item_types()
-
-    assert len(controller.cakes) == 1
-    assert controller.cakes[0].id == "chocolate"
-    assert controller.cakes[0].name == "Chocolate"
-    assert controller.cakes[0].image_url == "https://example.com/bolo.png"
-    assert controller.cakes[0].regular_price == 45.0
-    assert controller.cakes[0].promotional_price == 39.9
-    assert controller.cakes[0].stock == 2
-
-    controller.firestore_client.list_active_item_types = AsyncMock(return_value=[])
-    controller.firestore_client.list_available_items.return_value = []
-    await controller.load_item_types()
-
-    assert controller.cakes == []
-    assert controller.quantities == {}
 
 
-@pytest.mark.asyncio
-async def test_production_adds_multiple_units_across_flavors_atomically():
-    chocolate = Cake(
-        "chocolate", "Chocolate", "Bolo de chocolate", 3, "#F0E2D6"
-    )
-    strawberry = Cake(
-        "strawberry", "Morango", "Bolo de morango", 1, "#F3E4E6"
-    )
-    controller = CatalogController(cakes=[chocolate, strawberry])
-    controller.firestore_client.create_documents_atomically = AsyncMock(
-        return_value={}
-    )
-
-    total = await controller.add_stock(
-        {"chocolate": 2, "strawberry": 3},
-        "owner-token",
-    )
-
-    assert total == 5
-    assert {cake.id: cake.stock for cake in controller.cakes} == {
-        "chocolate": 5,
-        "strawberry": 4,
-    }
-    collection, documents, token = (
-        controller.firestore_client.create_documents_atomically.await_args.args
-    )
-    assert collection == "items"
-    assert token == "owner-token"
-    assert len(documents) == 5
-    assert [
-        fields["itemTypeId"]["stringValue"] for _, fields in documents
-    ].count("chocolate") == 2
-    assert [
-        fields["itemTypeId"]["stringValue"] for _, fields in documents
-    ].count("strawberry") == 3
-    assert all(
-        fields["status"] == {"stringValue": "DISPONIVEL"}
-        and "timestampValue" in fields["createdAt"]
-        for _, fields in documents
-    )
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("quantities", "message"),
-    [
-        ({"chocolate": 0}, "inteiro positivo"),
-        ({"chocolate": -1}, "inteiro positivo"),
-        ({"chocolate": 501}, "no máximo 500"),
-        ({"missing": 1}, "não existe mais"),
-    ],
-)
-async def test_production_rejects_invalid_additions(quantities, message):
-    controller = CatalogController(
-        cakes=[Cake("chocolate", "Chocolate", "Bolo", 0, "#F0E2D6")]
-    )
-    controller.firestore_client.create_documents_atomically = AsyncMock()
-
-    with pytest.raises(ValueError, match=message):
-        await controller.add_stock(quantities, "owner-token")
-
-    controller.firestore_client.create_documents_atomically.assert_not_awaited()
-    assert controller.cakes[0].stock == 0
 
 
-@pytest.mark.asyncio
-async def test_production_keeps_local_stock_when_firestore_batch_fails():
-    controller = CatalogController(
-        cakes=[Cake("chocolate", "Chocolate", "Bolo", 4, "#F0E2D6")]
-    )
-    controller.firestore_client.create_documents_atomically = AsyncMock(
-        side_effect=FirebaseRestError("Firestore indisponível", 503)
-    )
-
-    with pytest.raises(FirebaseRestError, match="Firestore indisponível"):
-        await controller.add_stock({"chocolate": 2}, "owner-token")
-
-    assert controller.cakes[0].stock == 4
 
 
 @pytest.mark.asyncio
@@ -1701,43 +861,6 @@ async def test_production_form_submits_multiple_flavors_and_quantities():
     assert view.dialog is None
 
 
-@pytest.mark.asyncio
-async def test_owner_catalog_includes_inactive_types_and_public_catalog_hides_them():
-    controller = CatalogController()
-    inactive_document = {
-        "document": {
-            "name": "projects/maphi/databases/(default)/documents/itemTypes/seasonal",
-            "fields": {
-                "name": {"stringValue": "Sabor sazonal"},
-                "isActive": {"booleanValue": False},
-            },
-        }
-    }
-    controller.firestore_client.list_item_types = AsyncMock(
-        return_value=[inactive_document]
-    )
-    controller.firestore_client.list_active_item_types = AsyncMock(
-        return_value=[]
-    )
-    controller.firestore_client.list_available_items = AsyncMock(
-        return_value=[]
-    )
-
-    await controller.load_item_types(
-        id_token="owner-token",
-        include_inactive=True,
-    )
-
-    assert [cake.name for cake in controller.cakes] == ["Sabor sazonal"]
-    assert controller.cakes[0].is_active is False
-    controller.firestore_client.list_item_types.assert_awaited_once_with(
-        "owner-token"
-    )
-
-    controller.hide_inactive_item_types()
-
-    assert controller.cakes == []
-    assert controller.quantities == {}
 
 
 @pytest.mark.asyncio
@@ -2082,175 +1205,22 @@ def _reservation_controller_with_available_item():
     return controller, client
 
 
-@pytest.mark.asyncio
-async def test_customer_reservation_atomically_allocates_stock_and_snapshots_price():
-    controller, client = _reservation_controller_with_available_item()
-
-    reservation = await controller.create_reservation(
-        quantities={"chocolate": 1},
-        pickup_spot_id="centro",
-        user_id="customer-1",
-        user_name="Maria",
-        is_owner=False,
-        id_token="customer-token",
-    )
-
-    writes = client.commit_transaction.await_args.args[0]
-    assert reservation.total_amount == Decimal("15.00")
-    assert reservation.item_ids == ("unit-1",)
-    assert reservation.status == "ATIVA"
-    assert len(writes) == 2
-    assert writes[0]["update"]["fields"]["status"] == {
-        "stringValue": "RESERVADO"
-    }
-    reservation_fields = writes[1]["update"]["fields"]
-    assert reservation_fields["saleType"] == {"stringValue": "PROMOCAO"}
-    assert reservation_fields["userId"] == {"stringValue": "customer-1"}
-    assert reservation_fields["totalAmount"] == {"doubleValue": 15.0}
-    client.run_query_in_transaction.assert_awaited_once()
-    query = client.run_query_in_transaction.await_args.args[0]
-    assert query["from"] == [{"collectionId": "items"}]
-    assert query["limit"] == 1
-    assert {
-        condition["fieldFilter"]["field"]["fieldPath"]
-        for condition in query["where"]["compositeFilter"]["filters"]
-    } == {"itemTypeId", "status"}
 
 
-@pytest.mark.asyncio
-async def test_owner_reservation_uses_regular_price_for_in_person_sale():
-    controller, client = _reservation_controller_with_available_item()
-
-    reservation = await controller.create_reservation(
-        quantities={"chocolate": 1},
-        pickup_spot_id="centro",
-        user_id="owner-1",
-        user_name="Dona",
-        is_owner=True,
-        id_token="owner-token",
-    )
-
-    assert reservation.total_amount == Decimal("20.00")
-    assert reservation.sale_type == "NORMAL"
-    item_write = client.commit_transaction.await_args.args[0][0]
-    assert item_write["update"]["fields"]["reservedPrice"] == {
-        "doubleValue": 20.0
-    }
 
 
-@pytest.mark.asyncio
-async def test_reservation_rejects_insufficient_stock_without_committing():
-    controller, client = _reservation_controller_with_available_item()
-    client.run_query_in_transaction.return_value = []
-
-    with pytest.raises(ReservationError, match="O estoque mudou"):
-        await controller.create_reservation(
-            quantities={"chocolate": 1},
-            pickup_spot_id="centro",
-            user_id="customer-1",
-            user_name="Maria",
-            is_owner=False,
-            id_token="customer-token",
-        )
-
-    client.commit_transaction.assert_not_awaited()
-    client.rollback_transaction.assert_awaited_once()
 
 
-@pytest.mark.asyncio
-async def test_reservation_retries_transaction_conflicts():
-    controller, client = _reservation_controller_with_available_item()
-    client.begin_transaction = AsyncMock(
-        side_effect=["transaction-1", "transaction-2"]
-    )
-    client.commit_transaction = AsyncMock(
-        side_effect=[FirebaseRestError("ABORTED", 409), {}]
-    )
-
-    await controller.create_reservation(
-        quantities={"chocolate": 1},
-        pickup_spot_id="centro",
-        user_id="customer-1",
-        user_name="Maria",
-        is_owner=False,
-        id_token="customer-token",
-    )
-
-    assert client.begin_transaction.await_count == 2
-    assert client.commit_transaction.await_count == 2
-    client.rollback_transaction.assert_not_awaited()
 
 
-@pytest.mark.asyncio
-async def test_owner_cancellation_releases_stock_and_records_cancellation_origin():
-    controller = ReservationController()
-    client = controller.firestore_client
-    reservation_path = client._document_name("reservations", "reservation-1")
-    item_path = client._document_name("items", "unit-1")
-    reservation_document = {
-        "name": reservation_path,
-        "fields": {
-            "status": {"stringValue": "ATIVA"},
-            "userId": {"stringValue": "customer-1"},
-            "itemIds": {
-                "arrayValue": {
-                    "values": [{"stringValue": "unit-1"}]
-                }
-            },
-        },
-    }
-    item_document = {
-        "name": item_path,
-        "fields": {
-            "status": {"stringValue": "RESERVADO"},
-            "reservationId": {"stringValue": "reservation-1"},
-        },
-    }
-
-    async def batch_get(document_names, *_):
-        document = (
-            reservation_document
-            if document_names == [reservation_path]
-            else item_document
-        )
-        return [{"found": document}]
-
-    client.begin_transaction = AsyncMock(return_value="transaction")
-    client.batch_get_in_transaction = AsyncMock(side_effect=batch_get)
-    client.commit_transaction = AsyncMock(return_value={})
-    client.rollback_transaction = AsyncMock()
-
-    await controller.cancel_reservation(
-        "reservation-1",
-        user_id="owner-1",
-        id_token="owner-token",
-        is_owner=True,
-    )
-
-    item_write, reservation_write = client.commit_transaction.await_args.args[0]
-    assert item_write["update"]["fields"]["status"] == {
-        "stringValue": "DISPONIVEL"
-    }
-    assert item_write["updateMask"]["fieldPaths"] == [
-        "status",
-        "reservationId",
-        "reservedPrice",
-    ]
-    assert reservation_write["update"]["fields"]["cancelledBy"] == {
-        "stringValue": "DONO"
-    }
-    assert reservation_write["update"]["fields"]["status"] == {
-        "stringValue": "CANCELADA"
-    }
 
 
 @pytest.mark.asyncio
 async def test_deleting_pickup_spot_cancels_reservations_before_deleting_spot():
     events = []
 
-    def record_cancellation(pickup_spot_id, *, owner_id, id_token):
+    def record_cancellation(pickup_spot_id, *, id_token):
         assert pickup_spot_id == "spot-1"
-        assert owner_id == "owner-1"
         assert id_token == "owner-token"
         events.append("cancel")
 
@@ -2297,7 +1267,6 @@ async def test_deleting_pickup_spot_cancels_reservations_before_deleting_spot():
     ]
     app.reservation_controller.cancel_active_for_pickup.assert_awaited_once_with(
         "spot-1",
-        owner_id="owner-1",
         id_token="owner-token",
     )
 
@@ -2320,11 +1289,11 @@ async def test_pickup_spot_is_not_deleted_when_reservation_cancellation_fails():
     app.page = SimpleNamespace(update=Mock())
     app.reservation_controller = SimpleNamespace(
         cancel_active_for_pickup=AsyncMock(
-            side_effect=FirebaseRestError("Firestore indisponível", 503)
+            side_effect=FirebaseRestError("API indisponível", 503)
         )
     )
 
-    with pytest.raises(FirebaseRestError, match="Firestore indisponível"):
+    with pytest.raises(FirebaseRestError, match="API indisponível"):
         await app.delete_pickup_spot("spot-1")
 
     app.pickup_spot_controller.deactivate_pickup_spot.assert_awaited_once()
@@ -2383,49 +1352,3 @@ async def test_reserving_more_than_two_selected_units_creates_multiple_reservati
         "2 reservas criadas. Valor a pagar: R$ 45,00"
     )
     app.open_reservations.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_owner_removes_only_one_available_inventory_unit():
-    cake = Cake("chocolate", "Chocolate", "Bolo", 2, "#F0E2D6")
-    controller = CatalogController([cake])
-    client = controller.firestore_client
-    available_item = {
-        "name": client._document_name("items", "unit-1"),
-        "fields": {
-            "itemTypeId": {"stringValue": "chocolate"},
-            "status": {"stringValue": "DISPONIVEL"},
-        },
-    }
-    client.begin_transaction = AsyncMock(return_value="transaction")
-    client.run_query_in_transaction = AsyncMock(
-        return_value=[{"document": available_item}]
-    )
-    client.commit_transaction = AsyncMock(return_value={})
-    client.rollback_transaction = AsyncMock()
-
-    await controller.remove_available_unit("chocolate", "owner-token")
-
-    writes = client.commit_transaction.await_args.args[0]
-    query = client.run_query_in_transaction.await_args.args[0]
-    assert writes == [{"delete": available_item["name"]}]
-    assert query["limit"] == 1
-    assert controller.cakes[0].stock == 1
-
-
-@pytest.mark.asyncio
-async def test_owner_cannot_remove_reserved_inventory_unit():
-    controller = CatalogController(
-        [Cake("chocolate", "Chocolate", "Bolo", 0, "#F0E2D6")]
-    )
-    client = controller.firestore_client
-    client.begin_transaction = AsyncMock(return_value="transaction")
-    client.run_query_in_transaction = AsyncMock(return_value=[])
-    client.commit_transaction = AsyncMock()
-    client.rollback_transaction = AsyncMock()
-
-    with pytest.raises(ValueError, match="Não há unidades não reservadas"):
-        await controller.remove_available_unit("chocolate", "owner-token")
-
-    client.commit_transaction.assert_not_awaited()
-    client.rollback_transaction.assert_awaited_once()

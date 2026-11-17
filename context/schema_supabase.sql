@@ -17,9 +17,16 @@ CREATE TABLE IF NOT EXISTS public.item_types (
     name text NOT NULL,
     description text,
     image_url text,
+    regular_price numeric(10, 2) NOT NULL CHECK (regular_price > 0),
+    promotional_price numeric(10, 2),
     is_custom_order_only boolean NOT NULL DEFAULT false,
     is_active boolean NOT NULL DEFAULT true,
-    created_at timestamptz NOT NULL DEFAULT now()
+    created_at timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT item_types_promotional_price_check
+        CHECK (
+            promotional_price IS NULL
+            OR (promotional_price > 0 AND promotional_price < regular_price)
+        )
 );
 
 CREATE TABLE IF NOT EXISTS public.items (
@@ -30,8 +37,10 @@ CREATE TABLE IF NOT EXISTS public.items (
         CHECK (status IN (
             'DISPONIVEL',
             'RESERVADO',
+            'VENDIDO',
             'VENDIDO_PRESENCIAL',
-            'EM_OFERTA_PRESENCIAL'
+            'EM_OFERTA_PRESENCIAL',
+            'REMOVIDO'
         )),
     expiration_at timestamptz,
     created_at timestamptz NOT NULL DEFAULT now()
@@ -44,6 +53,7 @@ CREATE TABLE IF NOT EXISTS public.pickup_spots (
     window_start timestamptz NOT NULL,
     window_end timestamptz NOT NULL,
     is_active boolean NOT NULL DEFAULT true,
+    deleted_at timestamptz,
     created_at timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT pickup_spots_window_order
         CHECK (window_end > window_start)
@@ -55,10 +65,20 @@ CREATE TABLE IF NOT EXISTS public.reservations (
         REFERENCES public.users (id) ON DELETE RESTRICT,
     pickup_spot_id uuid NOT NULL
         REFERENCES public.pickup_spots (id) ON DELETE RESTRICT,
+    user_name_snapshot text NOT NULL,
+    pickup_spot_name_snapshot text NOT NULL,
+    pickup_spot_address_snapshot text NOT NULL,
+    pickup_window_start_snapshot timestamptz NOT NULL,
+    pickup_window_end_snapshot timestamptz NOT NULL,
     sale_type text NOT NULL
         CHECK (sale_type IN ('PROMOCAO', 'NORMAL')),
     status text NOT NULL DEFAULT 'ATIVA'
         CHECK (status IN ('ATIVA', 'CONCLUIDA', 'CANCELADA')),
+    cancelled_by text
+        CHECK (cancelled_by IS NULL OR cancelled_by IN ('DONO', 'CLIENTE')),
+    cancelled_at timestamptz,
+    completed_at timestamptz,
+    deleted_at timestamptz,
     created_at timestamptz NOT NULL DEFAULT now()
 );
 
@@ -67,7 +87,10 @@ CREATE TABLE IF NOT EXISTS public.reservation_items (
         REFERENCES public.reservations (id) ON DELETE RESTRICT,
     item_id uuid NOT NULL
         REFERENCES public.items (id) ON DELETE RESTRICT,
+    item_type_id_snapshot uuid NOT NULL,
     item_type_name_snapshot text NOT NULL,
+    unit_price_snapshot numeric(10, 2) NOT NULL
+        CHECK (unit_price_snapshot > 0),
     CONSTRAINT reservation_items_pkey
         PRIMARY KEY (reservation_id, item_id)
 );
@@ -80,6 +103,10 @@ CREATE INDEX IF NOT EXISTS reservations_user_status_idx
 
 CREATE INDEX IF NOT EXISTS reservations_pickup_spot_status_idx
     ON public.reservations (pickup_spot_id, status);
+
+CREATE INDEX IF NOT EXISTS reservations_pickup_spot_active_idx
+    ON public.reservations (pickup_spot_id, created_at)
+    WHERE status = 'ATIVA' AND deleted_at IS NULL;
 
 CREATE INDEX IF NOT EXISTS reservation_items_item_id_idx
     ON public.reservation_items (item_id);

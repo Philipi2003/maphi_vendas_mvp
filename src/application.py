@@ -164,7 +164,7 @@ class MaphiApplication:
             self.catalog_view.refresh()
             self.page.update()
         except FirebaseRestError as exc:
-            self.show_message(f"Não foi possível carregar os sabores do Firestore: {exc}")
+            self.show_message(f"Não foi possível carregar os sabores da API: {exc}")
 
     async def load_database_pickup_spots(self) -> None:
         try:
@@ -361,7 +361,6 @@ class MaphiApplication:
         self.page.update()
         await self.reservation_controller.cancel_active_for_pickup(
             pickup_spot_id,
-            owner_id=self.auth_controller.user_id,
             id_token=self.auth_controller.id_token,
         )
         await self.pickup_spot_controller.delete_pickup_spot(
@@ -423,9 +422,7 @@ class MaphiApplication:
             raise ValueError("Entre na sua conta para cancelar uma reserva.")
         await self.reservation_controller.cancel_reservation(
             reservation_id,
-            user_id=self.auth_controller.user_id,
             id_token=self.auth_controller.id_token,
-            is_owner=self.auth_controller.is_owner,
         )
         await self.load_database_item_types()
         await self.load_reservations()
@@ -521,6 +518,9 @@ class MaphiApplication:
     async def _create_selected_reservations(
         self, pickup_spot_id: str, quantities: dict[str, int]
     ) -> None:
+        id_token = self.auth_controller.id_token
+        if not id_token:
+            raise ReservationError("Entre na sua conta para reservar bolos.")
         reservation_groups: list[dict[str, int]] = []
         current_group: dict[str, int] = {}
         current_group_size = 0
@@ -545,10 +545,7 @@ class MaphiApplication:
                     await self.reservation_controller.create_reservation(
                         quantities=group,
                         pickup_spot_id=pickup_spot_id,
-                        user_id=self.auth_controller.user_id,
-                        user_name=self.auth_controller.user_name or "Usuário",
-                        is_owner=self.auth_controller.is_owner,
-                        id_token=self.auth_controller.id_token,
+                        id_token=id_token,
                     )
                 )
             except (FirebaseRestError, ReservationError, ValueError) as exc:

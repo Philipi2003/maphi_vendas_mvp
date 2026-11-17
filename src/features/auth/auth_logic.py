@@ -16,7 +16,8 @@ from app_config import (
     PROJECT_ID,
     STORAGE_BUCKET,
 )
-from firebase_rest import FirebaseFirestoreClient, FirebaseRestError
+from firebase_rest import FirebaseRestError
+from maphi_api import MaphiApiClient
 
 
 class FirebaseAuthError(ValueError):
@@ -266,7 +267,7 @@ class AuthController:
         self.auth_client = FirebaseAuthClient()
         self.session_storage = session_storage
         self.google_auth_client = FirebaseGoogleAuthClient()
-        self.firestore_client = FirebaseFirestoreClient()
+        self.api_client = MaphiApiClient()
         self.role = "CLIENTE"
         self.auth_provider: str | None = None
 
@@ -459,28 +460,25 @@ class AuthController:
         if not id_token or not user_id or not email or not refresh_token:
             raise FirebaseAuthError("O Firebase não retornou os dados da sessão.")
 
-        try:
-            profile = await self.firestore_client.get_document(
-                "users", user_id, id_token
-            )
-        except FirebaseRestError as exc:
-            if exc.status_code == 404:
-                profile = {}
-            else:
-                raise FirebaseAuthError(
-                    "Login validado, mas não foi possível carregar o perfil e "
-                    "verificar as permissões no Firestore."
-                ) from exc
-
-        profile_fields = profile.get("fields", {})
-        profile_name = profile_fields.get("name", {}).get("stringValue")
-        self.role = profile_fields.get("role", {}).get("stringValue", "CLIENTE")
-        final_name = (
+        fallback = (
             fallback_name
             or result.get("displayName")
-            or profile_name
             or email.split("@", 1)[0]
         ).strip()
+        try:
+            profile = await self.api_client.upsert_profile(fallback, id_token)
+        except FirebaseRestError as exc:
+            raise FirebaseAuthError(
+                "Login validado, mas não foi possível carregar o perfil e "
+                "verificar as permissões no Supabase."
+            ) from exc
+
+        self.role = (
+            profile.get("role")
+            if profile.get("role") in {"CLIENTE", "DONO"}
+            else "CLIENTE"
+        )
+        final_name = str(profile.get("name") or fallback).strip()
 
         await self._persist_session(refresh_token, provider)
         self.id_token = id_token

@@ -2,20 +2,26 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from typing import Any, Callable
 from uuid import UUID
 
 import firebase_admin
 from firebase_admin import auth as firebase_auth
 from firebase_admin.exceptions import FirebaseError
+from firebase_admin import firestore as firebase_firestore
+from google.api_core.exceptions import GoogleAPIError
 import psycopg
 from firebase_functions import https_fn
 
 
 REGION = "southamerica-east1"
 API_PREFIX = "/api/v1"
+MAX_UNITS_PER_RESERVATION = 2
+MAX_STOCK_BATCH_UNITS = 500
 ALLOWED_ORIGINS = {
     "https://maphivendas.web.app",
     "https://maphivendas.firebaseapp.com",
@@ -28,14 +34,18 @@ ALLOWED_ORIGINS = {
 ITEM_STATUSES = {
     "DISPONIVEL",
     "RESERVADO",
+    "VENDIDO",
     "VENDIDO_PRESENCIAL",
     "EM_OFERTA_PRESENCIAL",
+    "REMOVIDO",
 }
 RESERVATION_STATUSES = {"ATIVA", "CONCLUIDA", "CANCELADA"}
 ITEM_TYPE_FIELDS = {
     "name",
     "description",
     "image_url",
+    "regular_price",
+    "promotional_price",
     "is_custom_order_only",
     "is_active",
 }
@@ -56,9 +66,11 @@ class ApiError(Exception):
         self.message = message
 
 
-def _json_default(value: Any) -> str:
+def _json_default(value: Any) -> Any:
     if isinstance(value, (UUID, datetime)):
         return str(value)
+    if isinstance(value, Decimal):
+        return float(value)
     raise TypeError(f"Unsupported JSON value: {type(value).__name__}")
 
 
@@ -113,7 +125,12 @@ def _body(request: https_fn.Request) -> dict[str, Any]:
 def _only_fields(payload: dict[str, Any], allowed: set[str]) -> None:
     unknown = set(payload) - allowed
     if unknown:
-        raise ApiError(400, "unknown_fields", "A requisição contém campos não aceitos.")
+        fields = ", ".join(sorted(unknown))
+        raise ApiError(
+            400,
+            "unknown_fields",
+            f"A requisição contém campos não aceitos: {fields}.",
+        )
 
 
 def _required_text(value: Any, field: str, max_length: int = 500) -> str:
@@ -164,6 +181,18 @@ def _timestamp(value: Any, field: str) -> datetime:
             "invalid_field",
             f"O campo {field} precisa incluir o fuso horário.",
         )
+    return result
+
+
+def _price(value: Any, field: str) -> Decimal:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ApiError(400, "invalid_field", f"O campo {field} deve ser um preço válido.")
+    try:
+        result = Decimal(str(value)).quantize(Decimal("0.01"))
+    except InvalidOperation as exc:
+        raise ApiError(400, "invalid_field", f"O campo {field} deve ser um preço válido.") from exc
+    if not result.is_finite() or result <= 0 or not math.isfinite(float(result)):
+        raise ApiError(400, "invalid_field", f"O campo {field} deve ser um preço válido.")
     return result
 
 
@@ -257,15 +286,30 @@ def _require_owner(
     claims: dict[str, Any],
 ) -> dict[str, Any]:
     profile = _profile(connection, claims)
+    _sync_firebase_storage_role(profile)
     if profile["role"] != "DONO":
         raise ApiError(403, "forbidden", "Esta operação exige o papel DONO.")
     return profile
+
+
+def _sync_firebase_storage_role(profile: dict[str, Any]) -> None:
+    document = (
+        firebase_firestore.client(app=_firebase_app())
+        .collection("users")
+        .document(str(profile["auth_uid"]))
+    )
+    existing = document.get()
+    if existing.exists and (existing.to_dict() or {}).get("role") == profile["role"]:
+        return
+    document.set({"role": profile["role"]}, merge=True)
 
 
 def _public_catalog(connection: psycopg.Connection) -> list[dict[str, Any]]:
     rows = connection.execute(
         """
         SELECT t.id, t.name, t.description, t.image_url,
+               t.regular_price, t.promotional_price,
+               t.is_custom_order_only, t.is_active,
                COUNT(i.id) FILTER (WHERE i.status = 'DISPONIVEL') AS stock
         FROM public.item_types AS t
         LEFT JOIN public.items AS i ON i.item_type_id = t.id
@@ -287,6 +331,7 @@ def _pickup_spots(
             """
             SELECT id, name, address, window_start, window_end, is_active, created_at
             FROM public.pickup_spots
+            WHERE deleted_at IS NULL
             ORDER BY window_start DESC
             LIMIT 200
             """
@@ -297,6 +342,7 @@ def _pickup_spots(
             SELECT id, name, address, window_start, window_end
             FROM public.pickup_spots
             WHERE is_active = TRUE
+              AND deleted_at IS NULL
               AND window_end > now() + interval '15 minutes'
             ORDER BY window_start
             LIMIT 200
@@ -309,17 +355,28 @@ def _reservation_rows(
     connection: psycopg.Connection,
     user_id: UUID | None = None,
     status: str | None = None,
+    pickup_spot_id: UUID | None = None,
+    reservation_id: UUID | None = None,
 ) -> list[dict[str, Any]]:
     query = """
-        SELECT r.id, r.user_id, u.name AS user_name, u.email AS user_email,
-               u.phone AS user_phone, r.pickup_spot_id,
-               p.name AS pickup_spot_name, p.address AS pickup_spot_address,
-               p.window_start, p.window_end, r.sale_type, r.status, r.created_at,
+        SELECT r.id, r.user_id,
+               COALESCE(r.user_name_snapshot, u.name) AS user_name,
+               u.email AS user_email, u.phone AS user_phone,
+               r.pickup_spot_id,
+               COALESCE(r.pickup_spot_name_snapshot, p.name) AS pickup_spot_name,
+               COALESCE(r.pickup_spot_address_snapshot, p.address) AS pickup_spot_address,
+               COALESCE(r.pickup_window_start_snapshot, p.window_start) AS window_start,
+               COALESCE(r.pickup_window_end_snapshot, p.window_end) AS window_end,
+               r.sale_type, r.status, r.cancelled_by, r.cancelled_at,
+               r.completed_at, r.created_at,
+               SUM(ri.unit_price_snapshot) AS total_amount,
                COALESCE(
                    json_agg(
                        json_build_object(
                            'item_id', ri.item_id,
-                           'item_type_name', ri.item_type_name_snapshot
+                           'item_type_id', ri.item_type_id_snapshot,
+                           'item_type_name', ri.item_type_name_snapshot,
+                           'unit_price', ri.unit_price_snapshot
                        ) ORDER BY ri.item_id
                    ) FILTER (WHERE ri.item_id IS NOT NULL),
                    '[]'::json
@@ -328,7 +385,7 @@ def _reservation_rows(
         JOIN public.users AS u ON u.id = r.user_id
         JOIN public.pickup_spots AS p ON p.id = r.pickup_spot_id
         LEFT JOIN public.reservation_items AS ri ON ri.reservation_id = r.id
-        WHERE TRUE
+        WHERE r.deleted_at IS NULL
     """
     params: list[Any] = []
     if user_id is not None:
@@ -337,6 +394,12 @@ def _reservation_rows(
     if status is not None:
         query += " AND r.status = %s"
         params.append(status)
+    if pickup_spot_id is not None:
+        query += " AND r.pickup_spot_id = %s"
+        params.append(pickup_spot_id)
+    if reservation_id is not None:
+        query += " AND r.id = %s"
+        params.append(reservation_id)
     query += """
         GROUP BY r.id, u.id, p.id
         ORDER BY r.created_at DESC
@@ -350,80 +413,165 @@ def _create_reservation(
     claims: dict[str, Any],
     payload: dict[str, Any],
 ) -> dict[str, Any]:
-    _only_fields(payload, {"pickup_spot_id", "item_ids"})
+    _only_fields(payload, {"pickup_spot_id", "items"})
     pickup_spot_id = _uuid(payload.get("pickup_spot_id"), "pickup_spot_id")
-    raw_item_ids = payload.get("item_ids")
-    if not isinstance(raw_item_ids, list) or not raw_item_ids:
-        raise ApiError(400, "invalid_items", "Informe ao menos uma unidade para reservar.")
-    item_ids = [_uuid(value, "item_ids") for value in raw_item_ids]
-    if len(set(item_ids)) != len(item_ids):
-        raise ApiError(400, "duplicate_items", "A lista contém unidades repetidas.")
+    raw_items = payload.get("items")
+    if not isinstance(raw_items, list) or not raw_items:
+        raise ApiError(400, "invalid_items", "Informe ao menos um sabor para reservar.")
+
+    quantities: dict[UUID, int] = {}
+    for entry in raw_items:
+        if not isinstance(entry, dict):
+            raise ApiError(400, "invalid_items", "A lista de sabores é inválida.")
+        _only_fields(entry, {"item_type_id", "quantity"})
+        item_type_id = _uuid(entry.get("item_type_id"), "item_type_id")
+        quantity = entry.get("quantity")
+        if type(quantity) is not int or quantity < 1:
+            raise ApiError(400, "invalid_quantity", "quantity deve ser um inteiro positivo.")
+        if item_type_id in quantities:
+            raise ApiError(400, "duplicate_items", "A lista contém sabores repetidos.")
+        quantities[item_type_id] = quantity
+    if sum(quantities.values()) > MAX_UNITS_PER_RESERVATION:
+        raise ApiError(
+            400,
+            "reservation_limit",
+            f"Uma reserva pode conter no máximo {MAX_UNITS_PER_RESERVATION} unidades.",
+        )
 
     profile = _profile(connection, claims)
     pickup_spot = connection.execute(
         """
-        SELECT id
+        SELECT id, name, address, window_start, window_end, is_active, deleted_at
         FROM public.pickup_spots
         WHERE id = %s
-          AND is_active = TRUE
-          AND window_end > now() + interval '15 minutes'
         FOR SHARE
         """,
         (pickup_spot_id,),
     ).fetchone()
-    if pickup_spot is None:
+    if (
+        pickup_spot is None
+        or pickup_spot["deleted_at"] is not None
+        or not pickup_spot["is_active"]
+    ):
+        raise ApiError(409, "pickup_unavailable", "O local ou horário de retirada não está disponível.")
+    if pickup_spot["window_end"] - pickup_spot["window_start"] < timedelta(minutes=15):
+        raise ApiError(409, "pickup_unavailable", "A janela de retirada precisa ter pelo menos 15 minutos.")
+    if (
+        profile["role"] != "DONO"
+        and pickup_spot["window_end"] <= datetime.now(pickup_spot["window_end"].tzinfo)
+        + timedelta(minutes=15)
+    ):
         raise ApiError(409, "pickup_unavailable", "O local ou horário de retirada não está disponível.")
 
-    items = connection.execute(
-        """
-        SELECT i.id, i.status, t.name AS item_type_name
-        FROM public.items AS i
-        JOIN public.item_types AS t ON t.id = i.item_type_id
-        WHERE i.id = ANY(%s)
-          AND t.is_active = TRUE
-          AND t.is_custom_order_only = FALSE
-        ORDER BY i.id
-        FOR UPDATE OF i
-        """,
-        (item_ids,),
-    ).fetchall()
-    if len(items) != len(item_ids) or any(row["status"] != "DISPONIVEL" for row in items):
-        raise ApiError(409, "items_unavailable", "Uma ou mais unidades já não estão disponíveis.")
+    reserved_items: list[dict[str, Any]] = []
+    for item_type_id, quantity in sorted(quantities.items(), key=lambda entry: str(entry[0])):
+        item_type = connection.execute(
+            """
+            SELECT id, name, is_active, is_custom_order_only,
+                   regular_price, promotional_price
+            FROM public.item_types
+            WHERE id = %s
+            FOR SHARE
+            """,
+            (item_type_id,),
+        ).fetchone()
+        if (
+            item_type is None
+            or item_type["is_custom_order_only"]
+            or (profile["role"] != "DONO" and not item_type["is_active"])
+        ):
+            raise ApiError(409, "items_unavailable", "Um dos sabores não está disponível para reserva.")
+        if item_type["regular_price"] is None:
+            raise ApiError(409, "price_unavailable", "Um dos sabores ainda não tem preço cadastrado.")
 
-    changed = connection.execute(
-        """
-        UPDATE public.items
-        SET status = 'RESERVADO'
-        WHERE id = ANY(%s)
-          AND status = 'DISPONIVEL'
-        RETURNING id
-        """,
-        (item_ids,),
-    ).fetchall()
-    if len(changed) != len(item_ids):
-        raise ApiError(409, "items_unavailable", "Uma ou mais unidades já não estão disponíveis.")
+        unit_price = (
+            item_type["regular_price"]
+            if profile["role"] == "DONO" or item_type["promotional_price"] is None
+            else item_type["promotional_price"]
+        )
+        available = connection.execute(
+            """
+            SELECT id
+            FROM public.items
+            WHERE item_type_id = %s AND status = 'DISPONIVEL'
+            ORDER BY created_at, id
+            LIMIT %s
+            FOR UPDATE SKIP LOCKED
+            """,
+            (item_type_id, quantity),
+        ).fetchall()
+        if len(available) != quantity:
+            raise ApiError(409, "items_unavailable", "O estoque mudou. Atualize o catálogo e tente novamente.")
 
+        item_ids = [row["id"] for row in available]
+        changed = connection.execute(
+            """
+            UPDATE public.items
+            SET status = 'RESERVADO'
+            WHERE id = ANY(%s) AND status = 'DISPONIVEL'
+            RETURNING id
+            """,
+            (item_ids,),
+        ).fetchall()
+        if len(changed) != quantity:
+            raise ApiError(409, "items_unavailable", "O estoque mudou. Atualize o catálogo e tente novamente.")
+        reserved_items.extend(
+            {
+                "id": item_id,
+                "item_type_id": item_type["id"],
+                "item_type_name": item_type["name"],
+                "unit_price": unit_price,
+            }
+            for item_id in item_ids
+        )
+
+    sale_type = "NORMAL" if profile["role"] == "DONO" else "PROMOCAO"
     reservation = connection.execute(
         """
-        INSERT INTO public.reservations (user_id, pickup_spot_id, sale_type, status)
-        VALUES (%s, %s, 'PROMOCAO', 'ATIVA')
+        INSERT INTO public.reservations (
+            user_id, pickup_spot_id, user_name_snapshot,
+            pickup_spot_name_snapshot, pickup_spot_address_snapshot,
+            pickup_window_start_snapshot, pickup_window_end_snapshot,
+            sale_type, status
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'ATIVA')
         RETURNING id, user_id, pickup_spot_id, sale_type, status, created_at
         """,
-        (profile["id"], pickup_spot_id),
+        (
+            profile["id"],
+            pickup_spot_id,
+            profile["name"],
+            pickup_spot["name"],
+            pickup_spot["address"],
+            pickup_spot["window_start"],
+            pickup_spot["window_end"],
+            sale_type,
+        ),
     ).fetchone()
     with connection.cursor() as cursor:
         cursor.executemany(
             """
             INSERT INTO public.reservation_items
-                (reservation_id, item_id, item_type_name_snapshot)
-            VALUES (%s, %s, %s)
+                (
+                    reservation_id, item_id, item_type_id_snapshot,
+                    item_type_name_snapshot, unit_price_snapshot
+                )
+            VALUES (%s, %s, %s, %s, %s)
             """,
             [
-                (reservation["id"], item["id"], item["item_type_name"])
-                for item in items
+                (
+                    reservation["id"],
+                    item["id"],
+                    item["item_type_id"],
+                    item["item_type_name"],
+                    item["unit_price"],
+                )
+                for item in reserved_items
             ],
         )
-    return dict(reservation, item_ids=[str(item_id) for item_id in item_ids])
+    return _reservation_rows(
+        connection, reservation_id=reservation["id"]
+    )[0]
 
 
 def _cancel_reservation(
@@ -436,7 +584,7 @@ def _cancel_reservation(
         """
         SELECT id, user_id, status
         FROM public.reservations
-        WHERE id = %s
+        WHERE id = %s AND deleted_at IS NULL
         FOR UPDATE
         """,
         (reservation_id,),
@@ -487,11 +635,13 @@ def _cancel_reservation(
     updated = connection.execute(
         """
         UPDATE public.reservations
-        SET status = 'CANCELADA'
+        SET status = 'CANCELADA',
+            cancelled_by = %s,
+            cancelled_at = now()
         WHERE id = %s AND status = 'ATIVA'
         RETURNING id, status
         """,
-        (reservation_id,),
+        ("DONO" if profile["role"] == "DONO" else "CLIENTE", reservation_id),
     ).fetchone()
     if updated is None:
         raise ApiError(409, "reservation_not_active", "A reserva não está mais ativa.")
@@ -500,8 +650,8 @@ def _cancel_reservation(
 
 def _validate_item_type(payload: dict[str, Any], partial: bool) -> dict[str, Any]:
     _only_fields(payload, ITEM_TYPE_FIELDS)
-    if not partial and "name" not in payload:
-        raise ApiError(400, "invalid_field", "O campo name é obrigatório.")
+    if not partial and not {"name", "regular_price"}.issubset(payload):
+        raise ApiError(400, "invalid_field", "Informe nome e preço normal.")
     result: dict[str, Any] = {}
     for field in ("name", "description", "image_url"):
         if field in payload:
@@ -509,6 +659,26 @@ def _validate_item_type(payload: dict[str, Any], partial: bool) -> dict[str, Any
                 result[field] = _required_text(payload[field], field, 160)
             else:
                 result[field] = _optional_text(payload[field], field)
+    if "regular_price" in payload:
+        result["regular_price"] = _price(payload["regular_price"], "regular_price")
+    elif not partial:
+        raise ApiError(400, "invalid_field", "O campo regular_price é obrigatório.")
+    if "promotional_price" in payload:
+        result["promotional_price"] = (
+            None
+            if payload["promotional_price"] is None
+            else _price(payload["promotional_price"], "promotional_price")
+        )
+    if (
+        result.get("promotional_price") is not None
+        and "regular_price" in result
+        and result["promotional_price"] >= result["regular_price"]
+    ):
+        raise ApiError(
+            400,
+            "invalid_price",
+            "O preço promocional deve ser menor que o preço normal.",
+        )
     for field in ("is_custom_order_only", "is_active"):
         if field in payload:
             result[field] = _required_bool(payload[field], field)
@@ -529,8 +699,15 @@ def _validate_pickup_spot(payload: dict[str, Any], partial: bool) -> dict[str, A
             result[field] = _timestamp(payload[field], field)
     if "is_active" in payload:
         result["is_active"] = _required_bool(payload["is_active"], "is_active")
-    if not partial and result["window_end"] <= result["window_start"]:
-        raise ApiError(400, "invalid_window", "O encerramento deve ser posterior ao início.")
+    if not partial and (
+        result["window_end"] <= result["window_start"]
+        or result["window_end"] - result["window_start"] < timedelta(minutes=15)
+    ):
+        raise ApiError(
+            400,
+            "invalid_window",
+            "A janela de retirada deve ter pelo menos 15 minutos.",
+        )
     return result
 
 
@@ -563,14 +740,20 @@ def _create_item_type(
     fields = _validate_item_type(payload, partial=False)
     fields.setdefault("description", None)
     fields.setdefault("image_url", None)
+    fields.setdefault("promotional_price", None)
     fields.setdefault("is_custom_order_only", False)
     fields.setdefault("is_active", True)
     row = connection.execute(
         """
         INSERT INTO public.item_types
-            (name, description, image_url, is_custom_order_only, is_active)
-        VALUES (%(name)s, %(description)s, %(image_url)s,
-                %(is_custom_order_only)s, %(is_active)s)
+            (
+                name, description, image_url, regular_price,
+                promotional_price, is_custom_order_only, is_active
+            )
+        VALUES (
+            %(name)s, %(description)s, %(image_url)s, %(regular_price)s,
+            %(promotional_price)s, %(is_custom_order_only)s, %(is_active)s
+        )
         RETURNING *
         """,
         fields,
@@ -582,39 +765,74 @@ def _create_items(
     connection: psycopg.Connection,
     payload: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    _only_fields(payload, {"item_type_id", "quantity", "expiration_at"})
-    item_type_id = _uuid(payload.get("item_type_id"), "item_type_id")
-    quantity = payload.get("quantity")
-    if type(quantity) is not int or not 1 <= quantity <= 200:
-        raise ApiError(400, "invalid_quantity", "quantity deve ser um inteiro entre 1 e 200.")
-    expiration_at = (
-        _timestamp(payload["expiration_at"], "expiration_at")
-        if payload.get("expiration_at") is not None
-        else None
-    )
-    item_type = connection.execute(
-        """
-        SELECT id
-        FROM public.item_types
-        WHERE id = %s
-          AND is_active = TRUE
-          AND is_custom_order_only = FALSE
-        FOR SHARE
-        """,
-        (item_type_id,),
-    ).fetchone()
-    if item_type is None:
-        raise ApiError(404, "item_type_not_found", "O sabor ativo não foi encontrado.")
-    rows = connection.execute(
-        """
-        INSERT INTO public.items (item_type_id, expiration_at)
-        SELECT %s, %s
-        FROM generate_series(1, %s)
-        RETURNING id, item_type_id, status, expiration_at, created_at
-        """,
-        (item_type_id, expiration_at, quantity),
-    ).fetchall()
-    return [dict(row) for row in rows]
+    if "items" in payload:
+        _only_fields(payload, {"items"})
+        raw_items = payload["items"]
+        if not isinstance(raw_items, list) or not raw_items:
+            raise ApiError(400, "invalid_items", "Informe ao menos um sabor para a produção.")
+        stock: dict[UUID, tuple[int, datetime | None]] = {}
+        for entry in raw_items:
+            if not isinstance(entry, dict):
+                raise ApiError(400, "invalid_items", "A lista de produção é inválida.")
+            _only_fields(entry, {"item_type_id", "quantity", "expiration_at"})
+            item_type_id = _uuid(entry.get("item_type_id"), "item_type_id")
+            quantity = entry.get("quantity")
+            if type(quantity) is not int or quantity < 1:
+                raise ApiError(400, "invalid_quantity", "quantity deve ser um inteiro positivo.")
+            if item_type_id in stock:
+                raise ApiError(400, "duplicate_items", "A produção contém sabores repetidos.")
+            expiration_at = (
+                _timestamp(entry["expiration_at"], "expiration_at")
+                if entry.get("expiration_at") is not None
+                else None
+            )
+            stock[item_type_id] = (quantity, expiration_at)
+    else:
+        _only_fields(payload, {"item_type_id", "quantity", "expiration_at"})
+        item_type_id = _uuid(payload.get("item_type_id"), "item_type_id")
+        quantity = payload.get("quantity")
+        if type(quantity) is not int or quantity < 1:
+            raise ApiError(400, "invalid_quantity", "quantity deve ser um inteiro positivo.")
+        expiration_at = (
+            _timestamp(payload["expiration_at"], "expiration_at")
+            if payload.get("expiration_at") is not None
+            else None
+        )
+        stock = {item_type_id: (quantity, expiration_at)}
+
+    total_units = sum(quantity for quantity, _ in stock.values())
+    if total_units > MAX_STOCK_BATCH_UNITS:
+        raise ApiError(
+            400,
+            "invalid_quantity",
+            f"Cada inserção pode conter no máximo {MAX_STOCK_BATCH_UNITS} unidades.",
+        )
+    created = []
+    for item_type_id, (quantity, expiration_at) in stock.items():
+        item_type = connection.execute(
+            """
+            SELECT id
+            FROM public.item_types
+            WHERE id = %s
+              AND is_active = TRUE
+              AND is_custom_order_only = FALSE
+            FOR SHARE
+            """,
+            (item_type_id,),
+        ).fetchone()
+        if item_type is None:
+            raise ApiError(404, "item_type_not_found", "O sabor ativo não foi encontrado.")
+        rows = connection.execute(
+            """
+            INSERT INTO public.items (item_type_id, expiration_at)
+            SELECT %s, %s
+            FROM generate_series(1, %s)
+            RETURNING id, item_type_id, status, expiration_at, created_at
+            """,
+            (item_type_id, expiration_at, quantity),
+        ).fetchall()
+        created.extend(dict(row) for row in rows)
+    return created
 
 
 def _update_item(
@@ -663,7 +881,8 @@ def _update_item(
 def _delete_item(connection: psycopg.Connection, item_id: UUID) -> dict[str, str]:
     row = connection.execute(
         """
-        DELETE FROM public.items
+        UPDATE public.items
+        SET status = 'REMOVIDO'
         WHERE id = %s AND status = 'DISPONIVEL'
         RETURNING id
         """,
@@ -712,14 +931,14 @@ def _update_pickup_spot(
         raise ApiError(400, "invalid_fields", "Informe ao menos um campo válido para atualizar.")
     current = connection.execute(
         """
-        SELECT window_start, window_end
+        SELECT window_start, window_end, deleted_at
         FROM public.pickup_spots
         WHERE id = %s
         FOR UPDATE
         """,
         (spot_id,),
     ).fetchone()
-    if current is None:
+    if current is None or current["deleted_at"] is not None:
         raise ApiError(404, "pickup_spot_not_found", "O local não foi encontrado.")
     if set(fields) - {"is_active"}:
         has_active_reservations = connection.execute(
@@ -729,6 +948,7 @@ def _update_pickup_spot(
                 FROM public.reservations
                 WHERE pickup_spot_id = %s
                   AND status = 'ATIVA'
+                  AND deleted_at IS NULL
             ) AS has_active
             """,
             (spot_id,),
@@ -741,22 +961,117 @@ def _update_pickup_spot(
             )
     start = fields.get("window_start", current["window_start"])
     end = fields.get("window_end", current["window_end"])
-    if end <= start:
-        raise ApiError(400, "invalid_window", "O encerramento deve ser posterior ao início.")
-    return _patch_row(connection, "pickup_spots", fields, spot_id)
+    if end <= start or end - start < timedelta(minutes=15):
+        raise ApiError(
+            400,
+            "invalid_window",
+            "A janela de retirada deve ter pelo menos 15 minutos.",
+        )
+    assignments = ", ".join(f"{field} = %s" for field in fields)
+    row = connection.execute(
+        f"""
+        UPDATE public.pickup_spots
+        SET {assignments}
+        WHERE id = %s AND deleted_at IS NULL
+        RETURNING *
+        """,
+        [*fields.values(), spot_id],
+    ).fetchone()
+    if row is None:
+        raise ApiError(404, "pickup_spot_not_found", "O local não foi encontrado.")
+    return dict(row)
 
 
 def _list_item_types(connection: psycopg.Connection) -> list[dict[str, Any]]:
     rows = connection.execute(
         """
-        SELECT id, name, description, image_url, is_custom_order_only,
-               is_active, created_at
-        FROM public.item_types
-        ORDER BY name
+        SELECT t.id, t.name, t.description, t.image_url, t.regular_price,
+               t.promotional_price, t.is_custom_order_only, t.is_active,
+               t.created_at,
+               COUNT(i.id) FILTER (WHERE i.status = 'DISPONIVEL') AS stock
+        FROM public.item_types AS t
+        LEFT JOIN public.items AS i ON i.item_type_id = t.id
+        GROUP BY t.id
+        ORDER BY t.name
         LIMIT 200
         """
     ).fetchall()
-    return [dict(row) for row in rows]
+    return [dict(row, stock=int(row["stock"])) for row in rows]
+
+
+def _list_items(
+    connection: psycopg.Connection,
+    item_type_id: UUID | None,
+    status: str | None,
+    limit: int,
+) -> list[dict[str, Any]]:
+    if status is not None and status not in ITEM_STATUSES:
+        raise ApiError(400, "invalid_status", "O filtro status é inválido.")
+    if not 1 <= limit <= 500:
+        raise ApiError(400, "invalid_limit", "limit deve estar entre 1 e 500.")
+    query = """
+        SELECT i.id, i.item_type_id, t.name AS item_type_name,
+               i.status, i.expiration_at, i.created_at
+        FROM public.items AS i
+        JOIN public.item_types AS t ON t.id = i.item_type_id
+        WHERE TRUE
+    """
+    params: list[Any] = []
+    if item_type_id is not None:
+        query += " AND i.item_type_id = %s"
+        params.append(item_type_id)
+    if status is not None:
+        query += " AND i.status = %s"
+        params.append(status)
+    query += " ORDER BY i.created_at, i.id LIMIT %s"
+    params.append(limit)
+    return [dict(row) for row in connection.execute(query, params).fetchall()]
+
+
+def _delete_pickup_spot(
+    connection: psycopg.Connection,
+    claims: dict[str, Any],
+    spot_id: UUID,
+) -> dict[str, Any]:
+    spot = connection.execute(
+        """
+        SELECT id, deleted_at
+        FROM public.pickup_spots
+        WHERE id = %s
+        FOR UPDATE
+        """,
+        (spot_id,),
+    ).fetchone()
+    if spot is None or spot["deleted_at"] is not None:
+        raise ApiError(404, "pickup_spot_not_found", "O local não foi encontrado.")
+
+    active_reservations = connection.execute(
+        """
+        SELECT id
+        FROM public.reservations
+        WHERE pickup_spot_id = %s
+          AND status = 'ATIVA'
+          AND deleted_at IS NULL
+        ORDER BY id
+        FOR UPDATE
+        """,
+        (spot_id,),
+    ).fetchall()
+    for row in active_reservations:
+        _cancel_reservation(connection, claims, row["id"])
+
+    row = connection.execute(
+        """
+        UPDATE public.pickup_spots
+        SET is_active = FALSE, deleted_at = now()
+        WHERE id = %s AND deleted_at IS NULL
+        RETURNING id
+        """,
+        (spot_id,),
+    ).fetchone()
+    if row is None:
+        raise ApiError(404, "pickup_spot_not_found", "O local não foi encontrado.")
+    return {"deleted": True, "id": row["id"]}
 
 
 def _request_path(request: https_fn.Request) -> str:
@@ -837,6 +1152,14 @@ def handle_request(
     except psycopg.errors.CheckViolation:
         logging.exception("Supabase check constraint violation")
         return _error(request, 400, "invalid_data", "Os dados não atendem às regras do banco.")
+    except GoogleAPIError:
+        logging.exception("Firebase profile role synchronization failed")
+        return _error(
+            request,
+            503,
+            "profile_sync_unavailable",
+            "Não foi possível sincronizar as permissões do perfil.",
+        )
     except psycopg.Error:
         logging.exception("Supabase operation failed")
         return _error(request, 503, "database_unavailable", "Não foi possível concluir a operação.")
@@ -854,7 +1177,10 @@ def _resolve_private_route(path: str, method: str) -> str | None:
             "GET": "admin_item_types_list",
             "POST": "admin_item_type_create",
         },
-        f"{API_PREFIX}/admin/items": {"POST": "admin_items_create"},
+        f"{API_PREFIX}/admin/items": {
+            "GET": "admin_items_list",
+            "POST": "admin_items_create",
+        },
         f"{API_PREFIX}/admin/pickup-spots": {
             "GET": "admin_pickup_spots_list",
             "POST": "admin_pickup_spot_create",
@@ -879,6 +1205,7 @@ def _resolve_private_route(path: str, method: str) -> str | None:
         }),
         (r"/api/v1/admin/reservations/([^/]+)", {
             "PATCH": "admin_reservation_update",
+            "DELETE": "admin_reservation_delete",
         }),
     )
     for pattern, methods in patterns:
@@ -895,7 +1222,7 @@ def _allowed_methods(path: str) -> str:
     if "/admin/item-types/" in path or "/admin/items/" in path or "/admin/pickup-spots/" in path:
         return "PATCH, DELETE"
     if "/admin/reservations/" in path:
-        return "PATCH"
+        return "PATCH, DELETE"
     route = _resolve_private_route(path, "")
     if route == "method_not_allowed":
         if path.endswith("/profile"):
@@ -907,7 +1234,7 @@ def _allowed_methods(path: str) -> str:
         if path.endswith("/admin/item-types"):
             return "GET, POST"
         if path.endswith("/admin/items"):
-            return "POST"
+            return "GET, POST"
         if path.endswith("/admin/pickup-spots"):
             return "GET, POST"
     return "GET, POST, PATCH, DELETE"
@@ -925,9 +1252,13 @@ def _run_private_route(
     connection: psycopg.Connection,
 ) -> tuple[dict[str, Any], int]:
     if route == "profile_get":
-        return {"profile": _profile(connection, claims)}, 200
+        profile = _profile(connection, claims)
+        _sync_firebase_storage_role(profile)
+        return {"profile": profile}, 200
     if route == "profile_upsert":
-        return {"profile": _profile(connection, claims, _body(request))}, 200
+        profile = _profile(connection, claims, _body(request))
+        _sync_firebase_storage_role(profile)
+        return {"profile": profile}, 200
     if route == "reservation_create":
         return {"reservation": _create_reservation(connection, claims, _body(request))}, 201
     if route == "reservations_list":
@@ -935,12 +1266,17 @@ def _run_private_route(
         status = request.args.get("status")
         if status is not None and status not in RESERVATION_STATUSES:
             raise ApiError(400, "invalid_status", "O filtro status é inválido.")
-        return {"reservations": _reservation_rows(connection, profile["id"], status)}, 200
+        return {
+            "reservations": _reservation_rows(connection, profile["id"], status)
+        }, 200
 
     if route.startswith("reservation_cancel:"):
         _, reservation_id = _route_id(route)
+        _cancel_reservation(connection, claims, reservation_id)
         return {
-            "reservation": _cancel_reservation(connection, claims, reservation_id)
+            "reservation": _reservation_rows(
+                connection, reservation_id=reservation_id
+            )[0]
         }, 200
 
     if route == "admin_reservations_list":
@@ -948,7 +1284,17 @@ def _run_private_route(
         status = request.args.get("status")
         if status is not None and status not in RESERVATION_STATUSES:
             raise ApiError(400, "invalid_status", "O filtro status é inválido.")
-        return {"reservations": _reservation_rows(connection, status=status)}, 200
+        raw_spot_id = request.args.get("pickup_spot_id")
+        pickup_spot_id = (
+            _uuid(raw_spot_id, "pickup_spot_id")
+            if raw_spot_id is not None
+            else None
+        )
+        return {
+            "reservations": _reservation_rows(
+                connection, status=status, pickup_spot_id=pickup_spot_id
+            )
+        }, 200
     if route.startswith("admin_reservation_update:"):
         _require_owner(connection, claims)
         _, reservation_id = _route_id(route)
@@ -956,18 +1302,78 @@ def _run_private_route(
         _only_fields(payload, {"status"})
         if payload.get("status") != "CONCLUIDA":
             raise ApiError(400, "invalid_status", "O único status permitido nesta operação é CONCLUIDA.")
+        connection.execute(
+            """
+            SELECT id
+            FROM public.reservations
+            WHERE id = %s AND status = 'ATIVA' AND deleted_at IS NULL
+            FOR UPDATE
+            """,
+            (reservation_id,),
+        )
+        item_rows = connection.execute(
+            """
+            SELECT i.id, i.status
+            FROM public.reservation_items AS ri
+            JOIN public.items AS i ON i.id = ri.item_id
+            WHERE ri.reservation_id = %s
+            ORDER BY i.id
+            FOR UPDATE OF i
+            """,
+            (reservation_id,),
+        ).fetchall()
+        if not item_rows or any(row["status"] != "RESERVADO" for row in item_rows):
+            raise ApiError(
+                409,
+                "reservation_inventory_conflict",
+                "O estoque da reserva mudou; a operação não foi concluída.",
+            )
+        item_ids = [row["id"] for row in item_rows]
+        connection.execute(
+            """
+            UPDATE public.items
+            SET status = 'VENDIDO'
+            WHERE id = ANY(%s) AND status = 'RESERVADO'
+            """,
+            (item_ids,),
+        )
         row = connection.execute(
             """
             UPDATE public.reservations
-            SET status = 'CONCLUIDA'
-            WHERE id = %s AND status = 'ATIVA'
+            SET status = 'CONCLUIDA', completed_at = now()
+            WHERE id = %s AND status = 'ATIVA' AND deleted_at IS NULL
             RETURNING id, status
             """,
             (reservation_id,),
         ).fetchone()
         if row is None:
             raise ApiError(409, "reservation_not_active", "A reserva não está ativa ou não foi encontrada.")
-        return {"reservation": dict(row)}, 200
+        return {
+            "reservation": _reservation_rows(
+                connection, reservation_id=reservation_id
+            )[0]
+        }, 200
+    if route.startswith("admin_reservation_delete:"):
+        _require_owner(connection, claims)
+        _, reservation_id = _route_id(route)
+        row = connection.execute(
+            """
+            UPDATE public.reservations
+            SET deleted_at = now()
+            WHERE id = %s
+              AND status IN ('CONCLUIDA', 'CANCELADA')
+              AND deleted_at IS NULL
+            RETURNING id
+            """,
+            (reservation_id,),
+        ).fetchone()
+        if row is None:
+            raise ApiError(
+                409,
+                "reservation_not_deletable",
+                "Só é possível apagar reservas canceladas ou concluídas.",
+            )
+        return {"deleted": True, "id": row["id"]}, 200
 
     if route == "admin_item_types_list":
         _require_owner(connection, claims)
@@ -985,6 +1391,26 @@ def _run_private_route(
     if route.startswith("admin_item_type_delete:"):
         _require_owner(connection, claims)
         _, item_type_id = _route_id(route)
+        item_type = connection.execute(
+            "SELECT id FROM public.item_types WHERE id = %s FOR UPDATE",
+            (item_type_id,),
+        ).fetchone()
+        if item_type is None:
+            raise ApiError(404, "item_type_not_found", "O sabor não foi encontrado.")
+        has_items = connection.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1 FROM public.items WHERE item_type_id = %s
+            ) AS has_items
+            """,
+            (item_type_id,),
+        ).fetchone()["has_items"]
+        if has_items:
+            raise ApiError(
+                409,
+                "item_type_has_items",
+                "O sabor possui unidades de estoque ou histórico e não pode ser excluído.",
+            )
         row = connection.execute(
             "DELETE FROM public.item_types WHERE id = %s RETURNING id",
             (item_type_id,),
@@ -993,6 +1419,23 @@ def _run_private_route(
             raise ApiError(404, "item_type_not_found", "O sabor não foi encontrado.")
         return {"deleted": True, "id": row["id"]}, 200
 
+    if route == "admin_items_list":
+        _require_owner(connection, claims)
+        raw_item_type_id = request.args.get("item_type_id")
+        item_type_id = (
+            _uuid(raw_item_type_id, "item_type_id")
+            if raw_item_type_id is not None
+            else None
+        )
+        status = request.args.get("status")
+        raw_limit = request.args.get("limit", "200")
+        try:
+            limit = int(raw_limit)
+        except ValueError as exc:
+            raise ApiError(400, "invalid_limit", "limit deve ser um inteiro.") from exc
+        return {
+            "items": _list_items(connection, item_type_id, status, limit)
+        }, 200
     if route == "admin_items_create":
         _require_owner(connection, claims)
         return {"items": _create_items(connection, _body(request))}, 201
@@ -1020,12 +1463,6 @@ def _run_private_route(
     if route.startswith("admin_pickup_spot_delete:"):
         _require_owner(connection, claims)
         _, spot_id = _route_id(route)
-        row = connection.execute(
-            "DELETE FROM public.pickup_spots WHERE id = %s RETURNING id",
-            (spot_id,),
-        ).fetchone()
-        if row is None:
-            raise ApiError(404, "pickup_spot_not_found", "O local não foi encontrado.")
-        return {"deleted": True, "id": row["id"]}, 200
+        return _delete_pickup_spot(connection, claims, spot_id), 200
 
     raise ApiError(404, "not_found", "Rota não encontrada.")

@@ -3,10 +3,11 @@
 Aplicação web em Python com Flet, Firebase Authentication, Firebase Hosting,
 Firebase Cloud Functions e PostgreSQL no Supabase.
 
-O catálogo carrega os sabores e o estoque atual do endpoint público da Cloud
-Function, que consulta o PostgreSQL no Supabase. Login e reserva ainda não estão
-conectados ao Firebase; a interface informa isso explicitamente e não confirma
-nenhuma operação real.
+O app usa Firebase Authentication para login e Cloud Functions como backend da
+aplicação. A função autentica cada requisição com o Firebase ID token e acessa
+o PostgreSQL do Supabase diretamente pelo servidor; catálogo, estoque, locais,
+reservas e perfis não são lidos nem gravados pela API REST do Supabase.
+As imagens do catálogo continuam no Firebase Storage.
 
 O acesso abre uma tela dedicada em aparelhos com largura menor que 768 px e um
 modal em telas maiores. Ambos oferecem login por e-mail/senha, acesso com Google
@@ -103,10 +104,34 @@ Após associar este diretório ao projeto Firebase, gere os arquivos web e publi
 
 ```powershell
 $env:PYTHONUTF8 = "1"
-if (-not (Test-Path .env)) { throw "Arquivo .env não encontrado." }
+$configPath = if (Test-Path .env) { ".env" } elseif (Test-Path functions\.env) { "functions\.env" } else { $null }
+if (-not $configPath) { throw "Arquivo .env não encontrado na raiz nem em functions\." }
 if (Test-Path src\.env) { throw "src\.env já existe; remova-o ou faça backup antes do build." }
-$publicKeys = "FIREBASE_API_KEY|AUTH_DOMAIN|PROJECT_ID|STORAGE_BUCKET|MESSAGING_SENDER_ID|APP_ID|MEASUREMENT_ID"
-$publicConfig = Get-Content .env | Where-Object { $_ -match "^\s*($publicKeys)\s*=" }
+$aliases = @{
+    apiKey = "FIREBASE_API_KEY"
+    authDomain = "AUTH_DOMAIN"
+    projectId = "PROJECT_ID"
+    storageBucket = "STORAGE_BUCKET"
+    messagingSenderId = "MESSAGING_SENDER_ID"
+    appId = "APP_ID"
+    measurementId = "MEASUREMENT_ID"
+    MAPHI_FIREBASE_API_KEY = "FIREBASE_API_KEY"
+    MAPHI_AUTH_DOMAIN = "AUTH_DOMAIN"
+    MAPHI_PROJECT_ID = "PROJECT_ID"
+    MAPHI_STORAGE_BUCKET = "STORAGE_BUCKET"
+    MAPHI_MESSAGING_SENDER_ID = "MESSAGING_SENDER_ID"
+    MAPHI_APP_ID = "APP_ID"
+    MAPHI_MEASUREMENT_ID = "MEASUREMENT_ID"
+}
+$publicKeys = @("FIREBASE_API_KEY", "AUTH_DOMAIN", "PROJECT_ID", "STORAGE_BUCKET", "MESSAGING_SENDER_ID", "APP_ID", "MEASUREMENT_ID")
+$publicConfig = foreach ($line in Get-Content $configPath) {
+    if ($line -match "^\s*([^#:=\s]+)\s*[:=]\s*(.*?)\s*$") {
+        $key = $matches[1]
+        $value = $matches[2].Trim().TrimEnd(",").Trim([char]34, [char]39)
+        if ($aliases.ContainsKey($key)) { $key = $aliases[$key] }
+        if (($publicKeys -contains $key) -and $value) { "$key=$value" }
+    }
+}
 if (-not $publicConfig) { throw "Nenhuma configuração pública do Firebase foi encontrada no .env." }
 try {
     $publicConfig | Set-Content src\.env -Encoding ascii
@@ -132,8 +157,9 @@ O build é gerado em `build/web`, diretório configurado como origem do Firebase
 em `firebase.json`.
 
 O pacote npm `firebase` é o SDK JavaScript e não é usado pela aplicação Python.
-`firebase-tools` é a CLI de deploy; a aplicação acessa Firebase Authentication e
-Cloud Firestore pelas APIs REST.
+`firebase-tools` é a CLI de deploy; a aplicação usa Firebase Authentication e
+Firebase Storage, enquanto dados transacionais passam pela Cloud Function para
+o PostgreSQL do Supabase.
 
 O build web usa o caminho relativo `/api/v1/catalog`, encaminhado pelo Firebase
 Hosting à Cloud Function. O modo desktop usa `https://maphivendas.web.app` por
@@ -141,9 +167,15 @@ padrão; para apontá-lo a outro ambiente, defina `MAPHI_API_URL` com a URL base
 
 ## API e Supabase
 
-O script de tabelas está em `context/schema_supabase.sql`. Execute-o no SQL Editor
-do projeto Supabase antes de chamar a API. A função fica em `functions/` e é
-encaminhada pelo Hosting em `/api/**`.
+Para um banco novo, execute `context/schema_supabase.sql` no SQL Editor do
+Supabase. Para um banco criado com a versão anterior do schema, execute
+`context/migration_supabase_app_alignment.sql` antes de publicar a nova função.
+Essa migração não inventa preços: confira os `item_types` retornados pelo SELECT
+final e preencha `regular_price` no SQL Editor antes de permitir reservas.
+`promotional_price` é opcional e deve ser menor que `regular_price`.
+`window_start` e `window_end` são `timestamptz`.
+
+A função fica em `functions/` e é encaminhada pelo Hosting em `/api/**`.
 
 Rotas implementadas:
 
@@ -151,22 +183,27 @@ Rotas implementadas:
 - `GET|POST /api/v1/profile`: perfil do usuário autenticado.
 - `GET|POST /api/v1/reservations` e `POST /api/v1/reservations/{id}/cancel`.
 - `/api/v1/admin/item-types`: `GET`, `POST`, `PATCH` e `DELETE`.
-- `/api/v1/admin/items`: `POST`, `PATCH` e `DELETE`.
+- `/api/v1/admin/items`: `GET`, `POST`, `PATCH` e `DELETE`.
 - `/api/v1/admin/pickup-spots`: `GET`, `POST`, `PATCH` e `DELETE`.
-- `/api/v1/admin/reservations`: `GET` e `PATCH`.
+- `/api/v1/admin/reservations`: `GET`, `PATCH` e `DELETE`.
 - As rotas `/api/v1/admin/...` exigem `public.users.role = 'DONO'`.
 - `GET /api/v1/health`: verifica se a função está respondendo, sem consultar o banco.
 
 As rotas privadas exigem `Authorization: Bearer <Firebase ID token>`. A função
 verifica o token com Firebase Admin e busca o papel no banco; o cliente não pode
-se promover a dono. O cadastro/login do Firebase Auth e a conexão dessas rotas à
-interface Flet ainda precisam ser integrados.
+se promover a dono. O login/cadastro continua no Firebase Authentication e o
+perfil com papel é obtido pela rota `/profile`.
 
 O corpo de `POST /api/v1/reservations` usa `pickup_spot_id` e uma lista de
-`item_ids`. O corpo de `POST /api/v1/admin/items` usa `item_type_id`, `quantity`
-e, opcionalmente, `expiration_at`. As datas de locais de retirada devem ser ISO
-8601 com fuso horário. A reserva bloqueia as unidades em uma única transação;
-unidades reservadas não podem ser removidas ou alteradas pelo endpoint de estoque.
+`items`, cada qual com `item_type_id` e `quantity`. O preço aplicável e as
+unidades de estoque são definidos pelo servidor, dentro da transação do banco,
+e gravados como snapshots. Uma reserva pode conter até duas unidades. O corpo
+de `POST /api/v1/admin/items` aceita `items` com pares
+`item_type_id`/`quantity` (até 500 unidades por lote) e `expiration_at`
+opcional por sabor. As datas de locais devem ser ISO 8601 com fuso horário.
+Excluir reservas e locais é lógico para preservar o histórico; excluir um
+local também cancela eventuais reservas ativas. Unidades removidas do estoque
+mantêm seu registro com status `REMOVIDO`.
 
 ### Configurar e publicar a função
 
@@ -190,6 +227,18 @@ firebase functions:secrets:set SUPABASE_DB_URL
 firebase deploy --only functions,hosting
 ```
 
+Publicar somente o Hosting atualiza o app, mas não atualiza a Cloud Function.
+Para publicar apenas o backend da API após mudanças em `functions/`, use
+`firebase deploy --only functions:api`.
+
+Se usar `functions/.env` para as configurações Web públicas do Firebase, cada
+linha deve estar no formato dotenv (`MAPHI_AUTH_DOMAIN="..."`), sem `:` ou
+vírgulas finais. Use as chaves `MAPHI_FIREBASE_API_KEY`, `MAPHI_AUTH_DOMAIN`,
+`MAPHI_PROJECT_ID`, `MAPHI_STORAGE_BUCKET`, `MAPHI_MESSAGING_SENDER_ID`,
+`MAPHI_APP_ID` e `MAPHI_MEASUREMENT_ID`. Não use o prefixo reservado
+`FIREBASE_` nesse arquivo. Não coloque a connection string do Supabase nele; use
+o Secret Manager como mostrado acima.
+
 O comando de segredo solicitará o valor de forma interativa. A função está na
 região `southamerica-east1`; alinhe essa região à região do banco Supabase se
 necessário.
@@ -208,56 +257,27 @@ SET role = 'DONO'
 WHERE auth_uid = '<UID_FIREBASE_DO_DONO>';
 ```
 
+Saia e entre novamente na conta após alterar o papel. O login recarrega o perfil
+do Supabase e sincroniza o papel usado pelas regras do Firebase Storage.
+
 As tabelas têm RLS habilitado sem políticas para bloquear acesso direto pela API
-do Supabase. A Cloud Function usa credenciais de banco apenas no servidor; não
-coloque a connection string nem credenciais privilegiadas no build web.
-- `itemTypes`: `name`, `description`, `imageUrl`, `isCustomOrderOnly`,
-  `regularPrice`, `promotionalPrice` (opcional), `isActive`, `createdAt`.
-  Perfis públicos e clientes listam apenas sabores ativos; o dono também pode
-  visualizar sabores inativos, editar seus dados e alternar `isActive`.
-  Criação, edição e exclusão exigem perfil com `role: "DONO"`. O app só oferece
-  exclusão quando não há documentos de estoque associados ao sabor.
-- `items`: `itemTypeId`, `itemTypeName`, `status`, `expirationDate` (opcional),
-  `createdAt`. Leitura pública apenas das unidades com status `DISPONIVEL`.
-- `pickupSpots`: `name`, `address`, `arrivalAt`, `departureAt`, `isActive`,
-  `createdAt`. Chegada e saída são timestamps completos, inseridos no horário
-  local de São Paulo (`DD/MM/AAAA HH:MM`). A janela deve ter pelo menos 15 minutos;
-  para clientes, o local só aparece quando a saída ainda estiver a mais de
-  15 minutos do horário atual. O dono pode criar, editar e excluir locais pelo
-  catálogo, inclusive remover locais obsoletos. Ao excluir um local, ele é
-  desativado primeiro, as reservas ativas são canceladas e suas unidades voltam
-  ao estoque antes da remoção definitiva. Locais legados sem timestamps
-  completos ficam ocultos para clientes e podem ser editados ou removidos pelo
-  dono.
-- `users/{uid}`: `name`, `phone`, `createdAt`. Cada usuário lê e altera apenas
-  seu próprio perfil; não pode definir seu próprio papel.
-- `reservations`: `userId`, `pickupSpotId`, `itemIds`, `itemTypeNames`,
-  `itemTypeIds`, `unitPrices`, `totalAmount`, snapshot do local de retirada,
-  `saleType`, `status` e timestamps de criação, cancelamento e conclusão.
-  Leitura apenas pelo cliente proprietário ou pelo dono. Cada reserva agrupa
-  até duas unidades para manter a atualização de estoque verificável pelas
-  regras do Firestore; seleções maiores são divididas automaticamente em
-  reservas adicionais. Não há limite total de unidades ativas por cliente.
-  O dono pode criar reservas para vendas presenciais, filtrar a lista por local,
-  cancelar ou concluir reservas e apagar reservas já canceladas ou concluídas.
+do Supabase. A Cloud Function usa a connection string do banco somente no
+servidor; não a inclua no build web. O dono inicial precisa criar o perfil e
+receber o papel `DONO` por uma atualização administrativa no SQL Editor.
+O papel autoritativo é `public.users.role`; a Cloud Function espelha esse valor
+em `users/{uid}` no Firestore somente para que as regras do Firebase Storage
+possam autorizar uploads e exclusões de imagens.
 
-Ao iniciar, o app carrega os `itemTypes` e conta os documentos de `items` com
-status `DISPONIVEL` para exibir o estoque de cada sabor. Donos podem registrar
-uma produção pelo FAB, selecionando um ou mais sabores e suas quantidades; cada
-bolo é salvo como um documento individual em `items`, em uma gravação atômica
-de até 500 unidades por inserção. As unidades novas começam com status
-`DISPONIVEL`. Ao renomear um sabor, o app também atualiza `itemTypeName` nas
-unidades de estoque associadas. A contagem exibida ao dono é de unidades não
-reservadas; a remoção só exclui um documento com status `DISPONIVEL`, protegida
-por transação e pelas regras Firestore.
-
-As regras identificam o dono por `users/{uid}.role == "DONO"`. O próprio usuário
-não pode criar ou editar esse campo: a conta de dono inicial deve receber o papel
-por uma ação administrativa no Console do Firebase. Contas sem esse papel têm
-permissões de cliente. Reservar, cancelar e concluir uma reserva atualiza
-atomicamente o estado da reserva e das unidades de estoque. Clientes podem
-cancelar apenas as próprias reservas; o dono pode cancelar reservas de qualquer
-usuário, e essa origem fica visível na listagem do cliente.
+Preços ficam em `public.item_types`; o estoque individual fica em
+`public.items`. `public.reservations` e `public.reservation_items` armazenam
+reservas, unidades vinculadas, preços e descrições imutáveis do momento da
+operação. Os snapshots preservam o histórico quando o nome do sabor ou os
+dados do local são alterados posteriormente.
+Os locais usam timestamps com fuso hor?rio e janelas m?nimas de 15 minutos.
+O app carrega cat?logo, estoque, locais, reservas e perfis pela Cloud Function.
+A API grava pre?os e dados do cliente/local como snapshots para preservar o
+hist?rico; unidades removidas, reservas apagadas e locais exclu?dos s?o mantidos
+com estado l?gico apropriado.
 
 Fotos de sabores são enviadas ao Firebase Storage, em `itemTypes/{uid}/`, antes
 de o sabor ser gravado. As regras em `storage.rules` permitem leitura das imagens
@@ -268,7 +288,7 @@ de até 5 MB. Publique as regras com:
 firebase deploy --only storage
 ```
 
-Para o Flutter Web conseguir carregar as imagens em cards, configure CORS no
+Para o Flet Web conseguir carregar as imagens em cards, configure CORS no
 bucket. O bucket deve ser atualizado com uma conta Google Cloud que tenha
 permissão para administrar o Storage:
 
