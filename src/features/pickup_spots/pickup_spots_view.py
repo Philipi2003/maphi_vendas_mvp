@@ -3,7 +3,7 @@ from datetime import date, datetime, time
 
 import flet as ft
 
-from app_config import INK
+from adaptive_form import build_adaptive_form_surface
 from features.pickup_spots.pickup_spots_logic import PickupSpot
 from firebase_rest import FirebaseRestError
 
@@ -17,7 +17,7 @@ class PickupSpotFormView:
         self.on_update = on_update
         self.on_notice = on_notice
         self.on_message = on_message
-        self.dialog: ft.AlertDialog | None = None
+        self.dialog: ft.AlertDialog | ft.BottomSheet | None = None
         self.editing_pickup_spot: PickupSpot | None = None
         self.name_field: ft.TextField | None = None
         self.address_field: ft.TextField | None = None
@@ -132,37 +132,35 @@ class PickupSpotFormView:
             icon=ft.Icons.SAVE_OUTLINED,
             on_click=self._submit,
         )
-        self.dialog = ft.AlertDialog(
-            modal=False,
-            title=ft.Text(
-                "Editar local de retirada" if pickup_spot else "Novo local de retirada",
-                color=INK,
-            ),
-            content=ft.Container(
-                width=440,
-                content=ft.Column(
-                    controls=[
-                        self.name_field,
-                        self.address_field,
-                        self._date_time_picker_row(
-                            "Chegada",
-                            self.arrival_date_label,
-                            self.arrival_time_label,
-                            self._open_arrival_date_picker,
-                            self._open_arrival_time_picker,
-                        ),
-                        self._date_time_picker_row(
-                            "Saída",
-                            self.departure_date_label,
-                            self.departure_time_label,
-                            self._open_departure_date_picker,
-                            self._open_departure_time_picker,
-                        ),
-                        self.form_error,
-                    ],
-                    tight=True,
-                    spacing=12,
-                ),
+        title = (
+            "Editar local de retirada" if pickup_spot else "Novo local de retirada"
+        )
+        self.dialog = build_adaptive_form_surface(
+            self.page,
+            title=title,
+            content=ft.Column(
+                controls=[
+                    self.name_field,
+                    self.address_field,
+                    self._date_time_picker_row(
+                        "Chegada",
+                        self.arrival_date_label,
+                        self.arrival_time_label,
+                        self._open_arrival_date_picker,
+                        self._open_arrival_time_picker,
+                    ),
+                    self._date_time_picker_row(
+                        "Saída",
+                        self.departure_date_label,
+                        self.departure_time_label,
+                        self._open_departure_date_picker,
+                        self._open_departure_time_picker,
+                    ),
+                    self.form_error,
+                ],
+                spacing=12,
+                scroll=ft.ScrollMode.AUTO,
+                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
             ),
             actions=[
                 ft.TextButton(
@@ -171,7 +169,7 @@ class PickupSpotFormView:
                 ),
                 self.submit_button,
             ],
-            actions_alignment=ft.MainAxisAlignment.END,
+            desktop_width=440,
             on_dismiss=self._on_dismiss,
         )
         self.page.show_dialog(self.dialog)

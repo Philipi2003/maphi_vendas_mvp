@@ -39,27 +39,52 @@ class CatalogCardView:
             status_text = "Inativo"
         elif available:
             status_text = (
-                f"{cake.stock} não reservados"
+                f"{cake.stock} disponíveis · {cake.reserved_stock} reservados"
                 if self.is_owner
                 else f"{cake.stock} disponíveis"
             )
+        elif self.is_owner and cake.reserved_stock:
+            status_text = f"{cake.reserved_stock} reservados"
         elif cake.is_custom_order_only:
             status_text = "Sob encomenda"
         else:
             status_text = "Esgotado no momento"
         status_color = GREEN if cake.is_active and available else MUTED
 
-        if available:
-            footer_controls = [self._quantity_control()]
-            if self.is_owner and self.on_remove_stock is not None:
+        if self.is_owner:
+            footer_controls = []
+            if available:
+                footer_controls.append(self._quantity_control())
+            if self.on_remove_stock is not None:
                 footer_controls.append(
                     ft.TextButton(
-                        "Remover 1 não reservado",
+                        "Remover unidades",
                         icon=ft.Icons.DELETE_OUTLINE,
+                        disabled=not available,
                         on_click=self._remove_stock,
                     )
                 )
+            stock_details = (
+                f"Não reservados: {cake.stock} · "
+                f"Reservados: {cake.reserved_stock}"
+            )
+            if cake.reserved_stock:
+                stock_details += (
+                    "\nPara remover mais, cancele uma reserva deste sabor."
+                )
+            footer_controls.append(
+                ft.Text(
+                    stock_details,
+                    color=MUTED,
+                    size=11,
+                    text_align=ft.TextAlign.CENTER,
+                )
+            )
             footer = ft.Column(controls=footer_controls, spacing=4)
+        elif available:
+            footer = ft.Column(
+                controls=[self._quantity_control()], spacing=4
+            )
         else:
             footer = ft.Container(
                 content=ft.Text(
@@ -182,7 +207,7 @@ class CatalogCardView:
                 border=ft.Border.all(1, BORDER),
                 border_radius=20,
                 padding=14,
-                height=366,
+                height=440 if self.is_owner else 366,
                 shadow=ft.BoxShadow(
                     blur_radius=18,
                     color="#12000000",

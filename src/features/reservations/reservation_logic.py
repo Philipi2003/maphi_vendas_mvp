@@ -7,7 +7,6 @@ from features.pickup_spots.pickup_spots_logic import (
 )
 from maphi_api import MaphiApiClient
 
-MAX_UNITS_PER_RESERVATION = 2
 RESERVATION_ACTIVE = "ATIVA"
 RESERVATION_CANCELLED = "CANCELADA"
 RESERVATION_COMPLETED = "CONCLUIDA"
@@ -110,12 +109,6 @@ class ReservationController:
             raise ReservationError("Selecione ao menos um bolo para reservar.")
         if any(type(quantity) is not int or quantity < 0 for quantity in selected.values()):
             raise ReservationError("As quantidades selecionadas são inválidas.")
-        requested_units = sum(selected.values())
-        if requested_units > MAX_UNITS_PER_RESERVATION:
-            raise ReservationError(
-                f"Uma reserva pode conter no máximo "
-                f"{MAX_UNITS_PER_RESERVATION} unidades."
-            )
 
         payload = {
             "pickup_spot_id": pickup_spot_id,

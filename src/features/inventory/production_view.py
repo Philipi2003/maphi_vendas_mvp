@@ -2,7 +2,8 @@ from dataclasses import dataclass
 
 import flet as ft
 
-from app_config import ACCENT, INK
+from adaptive_form import build_adaptive_form_surface
+from app_config import ACCENT, BREAKPOINT_TABLET
 from features.catalog.catalog_logic import Cake
 from firebase_rest import FirebaseRestError
 
@@ -11,7 +12,7 @@ from firebase_rest import FirebaseRestError
 class ProductionEntry:
     item_type: ft.Dropdown
     quantity: ft.TextField
-    control: ft.Row | None = None
+    control: ft.Control | None = None
 
 
 class ProductionFormView:
@@ -27,7 +28,7 @@ class ProductionFormView:
         self.entries_column: ft.Column | None = None
         self.form_error: ft.Text | None = None
         self.submit_button: ft.FilledButton | None = None
-        self.dialog: ft.AlertDialog | None = None
+        self.dialog: ft.AlertDialog | ft.BottomSheet | None = None
 
     def open_form(self, item_types: list[Cake]) -> None:
         if not item_types:
@@ -36,7 +37,10 @@ class ProductionFormView:
 
         self.item_types = item_types
         self.entries = []
-        self.entries_column = ft.Column(spacing=8)
+        self.entries_column = ft.Column(
+            spacing=8,
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+        )
         self.form_error = ft.Text(color="#B3261E", size=13, visible=False)
         self.submit_button = ft.FilledButton(
             "Adicionar ao estoque",
@@ -44,29 +48,26 @@ class ProductionFormView:
             on_click=self._submit,
         )
         self._add_entry(refresh=False)
-        self.dialog = ft.AlertDialog(
-            modal=False,
-            title=ft.Text("Registrar produção", color=INK),
-            content=ft.Container(
-                width=520,
-                height=400,
-                content=ft.Column(
-                    controls=[
-                        ft.Text(
-                            "Informe os sabores e a quantidade produzida "
-                            "de cada um. O limite é 500 unidades por inserção."
-                        ),
-                        self.entries_column,
-                        ft.OutlinedButton(
-                            "Adicionar outro sabor",
-                            icon=ft.Icons.ADD,
-                            on_click=self._add_entry,
-                        ),
-                        self.form_error,
-                    ],
-                    spacing=12,
-                    scroll=ft.ScrollMode.AUTO,
-                ),
+        self.dialog = build_adaptive_form_surface(
+            self.page,
+            title="Registrar produção",
+            content=ft.Column(
+                controls=[
+                    ft.Text(
+                        "Informe os sabores e a quantidade produzida "
+                        "de cada um. O limite é 500 unidades por inserção."
+                    ),
+                    self.entries_column,
+                    ft.OutlinedButton(
+                        "Adicionar outro sabor",
+                        icon=ft.Icons.ADD,
+                        on_click=self._add_entry,
+                    ),
+                    self.form_error,
+                ],
+                spacing=12,
+                scroll=ft.ScrollMode.AUTO,
+                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
             ),
             actions=[
                 ft.TextButton(
@@ -75,7 +76,8 @@ class ProductionFormView:
                 ),
                 self.submit_button,
             ],
-            actions_alignment=ft.MainAxisAlignment.END,
+            desktop_width=520,
+            desktop_height=400,
             on_dismiss=self._on_dismiss,
         )
         self.page.show_dialog(self.dialog)
@@ -104,20 +106,30 @@ class ProductionFormView:
                 on_change=self._clear_error,
             ),
         )
-        entry.control = ft.Row(
-            controls=[
-                entry.item_type,
-                entry.quantity,
-                ft.IconButton(
-                    icon=ft.Icons.DELETE_OUTLINE,
-                    icon_color=ACCENT,
-                    tooltip="Remover sabor",
-                    on_click=lambda _, current=entry: self._remove_entry(current),
-                ),
-            ],
-            spacing=8,
-            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        remove_button = ft.IconButton(
+            icon=ft.Icons.DELETE_OUTLINE,
+            icon_color=ACCENT,
+            tooltip="Remover sabor",
+            on_click=lambda _, current=entry: self._remove_entry(current),
         )
+        if self._is_mobile:
+            entry.control = ft.Column(
+                controls=[
+                    entry.item_type,
+                    ft.Row(
+                        controls=[entry.quantity, remove_button],
+                        spacing=8,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                ],
+                spacing=6,
+            )
+        else:
+            entry.control = ft.Row(
+                controls=[entry.item_type, entry.quantity, remove_button],
+                spacing=8,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            )
         self.entries.append(entry)
         self.entries_column.controls.append(entry.control)
         if refresh:
@@ -203,6 +215,11 @@ class ProductionFormView:
 
     def _on_dismiss(self, _=None) -> None:
         self.dialog = None
+
+    @property
+    def _is_mobile(self) -> bool:
+        width = getattr(self.page, "width", None)
+        return width is not None and width < BREAKPOINT_TABLET
 
     def _close(self) -> None:
         if self.dialog is not None:

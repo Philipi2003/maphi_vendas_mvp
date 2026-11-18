@@ -20,7 +20,6 @@ from firebase_functions import https_fn
 
 REGION = "southamerica-east1"
 API_PREFIX = "/api/v1"
-MAX_UNITS_PER_RESERVATION = 2
 MAX_STOCK_BATCH_UNITS = 500
 ALLOWED_ORIGINS = {
     "https://maphivendas.web.app",
@@ -408,14 +407,7 @@ def _reservation_rows(
     return [dict(row) for row in connection.execute(query, params).fetchall()]
 
 
-def _create_reservation(
-    connection: psycopg.Connection,
-    claims: dict[str, Any],
-    payload: dict[str, Any],
-) -> dict[str, Any]:
-    _only_fields(payload, {"pickup_spot_id", "items"})
-    pickup_spot_id = _uuid(payload.get("pickup_spot_id"), "pickup_spot_id")
-    raw_items = payload.get("items")
+def _reservation_quantities(raw_items: Any) -> dict[UUID, int]:
     if not isinstance(raw_items, list) or not raw_items:
         raise ApiError(400, "invalid_items", "Informe ao menos um sabor para reservar.")
 
@@ -431,12 +423,17 @@ def _create_reservation(
         if item_type_id in quantities:
             raise ApiError(400, "duplicate_items", "A lista contém sabores repetidos.")
         quantities[item_type_id] = quantity
-    if sum(quantities.values()) > MAX_UNITS_PER_RESERVATION:
-        raise ApiError(
-            400,
-            "reservation_limit",
-            f"Uma reserva pode conter no máximo {MAX_UNITS_PER_RESERVATION} unidades.",
-        )
+    return quantities
+
+
+def _create_reservation(
+    connection: psycopg.Connection,
+    claims: dict[str, Any],
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    _only_fields(payload, {"pickup_spot_id", "items"})
+    pickup_spot_id = _uuid(payload.get("pickup_spot_id"), "pickup_spot_id")
+    quantities = _reservation_quantities(payload.get("items"))
 
     profile = _profile(connection, claims)
     pickup_spot = connection.execute(
@@ -903,6 +900,53 @@ def _delete_item(connection: psycopg.Connection, item_id: UUID) -> dict[str, str
     )
 
 
+def _remove_items(
+    connection: psycopg.Connection,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    _only_fields(payload, {"item_type_id", "quantity"})
+    item_type_id = _uuid(payload.get("item_type_id"), "item_type_id")
+    quantity = payload.get("quantity")
+    if type(quantity) is not int or quantity < 1:
+        raise ApiError(400, "invalid_quantity", "quantity deve ser um inteiro positivo.")
+
+    available = connection.execute(
+        """
+        SELECT id
+        FROM public.items
+        WHERE item_type_id = %s AND status = 'DISPONIVEL'
+        ORDER BY created_at, id
+        LIMIT %s
+        FOR UPDATE SKIP LOCKED
+        """,
+        (item_type_id, quantity),
+    ).fetchall()
+    if len(available) != quantity:
+        raise ApiError(
+            409,
+            "insufficient_available_stock",
+            "O estoque não reservado mudou. Atualize os sabores e tente novamente.",
+        )
+
+    item_ids = [row["id"] for row in available]
+    removed = connection.execute(
+        """
+        UPDATE public.items
+        SET status = 'REMOVIDO'
+        WHERE id = ANY(%s) AND status = 'DISPONIVEL'
+        RETURNING id
+        """,
+        (item_ids,),
+    ).fetchall()
+    if len(removed) != quantity:
+        raise ApiError(
+            409,
+            "insufficient_available_stock",
+            "O estoque não reservado mudou. Atualize os sabores e tente novamente.",
+        )
+    return {"item_type_id": str(item_type_id), "removed": len(removed)}
+
+
 def _create_pickup_spot(
     connection: psycopg.Connection,
     payload: dict[str, Any],
@@ -988,7 +1032,8 @@ def _list_item_types(connection: psycopg.Connection) -> list[dict[str, Any]]:
         SELECT t.id, t.name, t.description, t.image_url, t.regular_price,
                t.promotional_price, t.is_custom_order_only, t.is_active,
                t.created_at,
-               COUNT(i.id) FILTER (WHERE i.status = 'DISPONIVEL') AS stock
+               COUNT(i.id) FILTER (WHERE i.status = 'DISPONIVEL') AS stock,
+               COUNT(i.id) FILTER (WHERE i.status = 'RESERVADO') AS reserved_stock
         FROM public.item_types AS t
         LEFT JOIN public.items AS i ON i.item_type_id = t.id
         GROUP BY t.id
@@ -996,7 +1041,14 @@ def _list_item_types(connection: psycopg.Connection) -> list[dict[str, Any]]:
         LIMIT 200
         """
     ).fetchall()
-    return [dict(row, stock=int(row["stock"])) for row in rows]
+    return [
+        dict(
+            row,
+            stock=int(row["stock"]),
+            reserved_stock=int(row["reserved_stock"]),
+        )
+        for row in rows
+    ]
 
 
 def _list_items(
@@ -1181,6 +1233,7 @@ def _resolve_private_route(path: str, method: str) -> str | None:
             "GET": "admin_items_list",
             "POST": "admin_items_create",
         },
+        f"{API_PREFIX}/admin/items/remove": {"POST": "admin_items_remove"},
         f"{API_PREFIX}/admin/pickup-spots": {
             "GET": "admin_pickup_spots_list",
             "POST": "admin_pickup_spot_create",
@@ -1218,6 +1271,8 @@ def _resolve_private_route(path: str, method: str) -> str | None:
 
 def _allowed_methods(path: str) -> str:
     if path.endswith("/cancel"):
+        return "POST"
+    if path.endswith("/admin/items/remove"):
         return "POST"
     if "/admin/item-types/" in path or "/admin/items/" in path or "/admin/pickup-spots/" in path:
         return "PATCH, DELETE"
@@ -1439,6 +1494,9 @@ def _run_private_route(
     if route == "admin_items_create":
         _require_owner(connection, claims)
         return {"items": _create_items(connection, _body(request))}, 201
+    if route == "admin_items_remove":
+        _require_owner(connection, claims)
+        return {"result": _remove_items(connection, _body(request))}, 200
     if route.startswith("admin_item_update:"):
         _require_owner(connection, claims)
         _, item_id = _route_id(route)

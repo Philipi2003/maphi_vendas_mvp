@@ -1,10 +1,12 @@
 import flet as ft
 
+from adaptive_form import build_adaptive_form_surface
 from app_config import (
     ACCENT,
     ACCENT_LIGHT,
     BACKGROUND,
     BORDER,
+    BREAKPOINT_TABLET,
     GREEN,
     INK,
     MUTED,
@@ -64,7 +66,8 @@ class CatalogView:
         self.is_owner = False
         self.is_authenticated = False
         self.filter_controls: dict[str, ft.Container] = {}
-        self.item_type_dialog: ft.AlertDialog | None = None
+        self.item_type_dialog: ft.AlertDialog | ft.BottomSheet | None = None
+        self.pickup_spot_sheet: ft.AlertDialog | ft.BottomSheet | None = None
         self.editing_item_type: Cake | None = None
         self.item_type_name: ft.TextField | None = None
         self.item_type_description: ft.TextField | None = None
@@ -99,6 +102,11 @@ class CatalogView:
             options=[],
             disabled=True,
             on_select=self._pickup_spot_changed,
+        )
+        self.pickup_spot_selector_button = ft.OutlinedButton(
+            content=self._pickup_spot_selector_content(None),
+            expand=True,
+            on_click=self._open_pickup_spot_sheet,
         )
         self.pickup_spot_edit_button = ft.OutlinedButton(
             "Editar local",
@@ -217,55 +225,65 @@ class CatalogView:
             )
 
         header = ft.Container(
-            content=ft.Row(
+            content=ft.ResponsiveRow(
                 controls=[
-                    ft.Row(
-                        controls=[
-                            ft.Container(
-                                content=ft.Icon(
-                                    ft.Icons.CAKE_OUTLINED,
-                                    color=ft.Colors.WHITE,
-                                    size=23,
-                                ),
-                                bgcolor=ACCENT,
-                                border_radius=13,
-                                width=42,
-                                height=42,
-                                alignment=ft.Alignment.CENTER,
-                            ),
-                            ft.Column(
-                                controls=[
-                                    ft.Text(
-                                        "maphi",
+                    ft.Container(
+                        col={"xs": 12, "md": 4},
+                        content=ft.Row(
+                            controls=[
+                                ft.Container(
+                                    content=ft.Icon(
+                                        ft.Icons.CAKE_OUTLINED,
+                                        color=ft.Colors.WHITE,
                                         size=23,
-                                        weight=ft.FontWeight.BOLD,
-                                        color=INK,
                                     ),
-                                    ft.Text(
-                                        "DOCES FEITOS COM CARINHO",
-                                        size=9,
-                                        color=MUTED,
-                                        weight=ft.FontWeight.W_600,
-                                    ),
-                                ],
-                                spacing=0,
-                            ),
-                        ],
-                        spacing=10,
+                                    bgcolor=ACCENT,
+                                    border_radius=13,
+                                    width=42,
+                                    height=42,
+                                    alignment=ft.Alignment.CENTER,
+                                ),
+                                ft.Column(
+                                    controls=[
+                                        ft.Text(
+                                            "maphi",
+                                            size=23,
+                                            weight=ft.FontWeight.BOLD,
+                                            color=INK,
+                                        ),
+                                        ft.Text(
+                                            "DOCES FEITOS COM CARINHO",
+                                            size=9,
+                                            color=MUTED,
+                                            weight=ft.FontWeight.W_600,
+                                        ),
+                                    ],
+                                    spacing=0,
+                                ),
+                            ],
+                            spacing=10,
+                        ),
                     ),
-                    ft.Row(
-                        controls=[self.reservations_button, self.account_button],
-                        spacing=8,
-                        wrap=True,
-                        alignment=ft.MainAxisAlignment.END,
+                    ft.Container(
+                        col={"xs": 12, "md": 8},
+                        alignment=ft.Alignment.CENTER_RIGHT,
+                        content=ft.Row(
+                            controls=[
+                                self.reservations_button,
+                                self.account_button,
+                            ],
+                            spacing=8,
+                            wrap=True,
+                            alignment=ft.MainAxisAlignment.END,
+                        ),
                     ),
                 ],
-                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                 vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                run_spacing=8,
             ),
             bgcolor=SURFACE,
             border=ft.Border.only(bottom=ft.BorderSide(1, BORDER)),
-            padding=ft.Padding.symmetric(horizontal=24, vertical=14),
+            padding=ft.Padding.symmetric(horizontal=16, vertical=12),
         )
 
         hero = ft.Container(
@@ -339,7 +357,7 @@ class CatalogView:
                                     ),
                                     ft.Row(
                                         controls=[
-                                            self.pickup_spot_dropdown,
+                                            self.pickup_spot_selector_button,
                                         ],
                                         vertical_alignment=ft.CrossAxisAlignment.CENTER,
                                         spacing=0,
@@ -441,7 +459,7 @@ class CatalogView:
                 spacing=0,
                 scroll=ft.ScrollMode.AUTO,
                 expand=True,
-                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
             ),
         )
 
@@ -511,6 +529,13 @@ class CatalogView:
             if pickup_spots
             else "Nenhum local de retirada disponível"
         )
+        selector_button = getattr(self, "pickup_spot_selector_button", None)
+        if selector_button is not None:
+            selected_spot = self.pickup_spot_controller.selected_pickup_spot
+            selector_button.content = self._pickup_spot_selector_content(
+                selected_spot
+            )
+            selector_button.disabled = not pickup_spots
         has_selected_spot = (
             self.pickup_spot_controller.selected_pickup_spot is not None
         )
@@ -520,6 +545,202 @@ class CatalogView:
         self.pickup_spot_delete_button.disabled = not has_selected_spot
         self._refresh_pickup_spot_details()
         self._update_reserve_button()
+
+    def _pickup_spot_selector_content(
+        self, pickup_spot: PickupSpot | None
+    ) -> ft.Control:
+        return ft.Row(
+            controls=[
+                ft.Icon(ft.Icons.LOCATION_ON_OUTLINED, color=ACCENT),
+                ft.Column(
+                    controls=[
+                        ft.Text(
+                            "LOCAL DE RETIRADA",
+                            size=10,
+                            color=MUTED,
+                            weight=ft.FontWeight.W_600,
+                        ),
+                        ft.Text(
+                            pickup_spot.name
+                            if pickup_spot
+                            else "Selecione um local",
+                            size=14,
+                            color=INK,
+                            weight=ft.FontWeight.W_600,
+                            max_lines=1,
+                            overflow=ft.TextOverflow.ELLIPSIS,
+                        ),
+                    ],
+                    spacing=2,
+                    expand=True,
+                ),
+                ft.Icon(ft.Icons.ARROW_DROP_DOWN, color=MUTED),
+            ],
+            spacing=10,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        )
+
+    def _open_pickup_spot_sheet(self, _=None) -> None:
+        pickup_spots = (
+            self.pickup_spot_controller.pickup_spots
+            if self.is_owner
+            else self.pickup_spot_controller.available_pickup_spots
+        )
+        if not pickup_spots:
+            return
+
+        selected_spot_id = self.pickup_spot_controller.selected_pickup_spot_id
+        spot_options: list[ft.Control] = []
+        for pickup_spot in pickup_spots:
+            is_selected = pickup_spot.id == selected_spot_id
+            is_available = (
+                self.pickup_spot_controller.is_pickup_spot_available(pickup_spot)
+            )
+            status = "Disponível para reserva" if is_available else "Indisponível"
+            spot_options.append(
+                ft.Container(
+                    content=ft.Row(
+                        controls=[
+                            ft.Icon(
+                                ft.Icons.LOCATION_ON_OUTLINED,
+                                color=ACCENT,
+                            ),
+                            ft.Column(
+                                controls=[
+                                    ft.Text(
+                                        pickup_spot.name,
+                                        color=INK,
+                                        weight=ft.FontWeight.W_600,
+                                    ),
+                                    ft.Text(
+                                        pickup_spot.address,
+                                        color=MUTED,
+                                        size=12,
+                                    ),
+                                    ft.Text(
+                                        f"{self._pickup_spot_schedule(pickup_spot)}"
+                                        f" · {status}",
+                                        color=GREEN if is_available else MUTED,
+                                        size=11,
+                                    ),
+                                ],
+                                spacing=3,
+                                expand=True,
+                            ),
+                            ft.Icon(
+                                ft.Icons.CHECK_CIRCLE_OUTLINE
+                                if is_selected
+                                else ft.Icons.CHEVRON_RIGHT,
+                                color=ACCENT if is_selected else MUTED,
+                            ),
+                        ],
+                        spacing=12,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    bgcolor=ACCENT_LIGHT if is_selected else SURFACE,
+                    border=ft.Border.all(1, ACCENT if is_selected else BORDER),
+                    border_radius=14,
+                    padding=14,
+                    on_click=lambda _, spot_id=pickup_spot.id: (
+                        self._select_pickup_spot(spot_id)
+                    ),
+                )
+            )
+
+        options_list = ft.ListView(
+            controls=spot_options,
+            spacing=8,
+            expand=True,
+        )
+        subtitle = ft.Text(
+            "A reserva ficará vinculada ao local selecionado.",
+            color=MUTED,
+            size=13,
+        )
+        page_width = getattr(self.page, "width", None)
+        if page_width is not None and page_width < BREAKPOINT_TABLET:
+            page_height = getattr(self.page, "height", None) or 720
+            sheet_height = min(560, max(320, page_height * 0.72))
+            self.pickup_spot_sheet = ft.BottomSheet(
+                content=ft.SafeArea(
+                    content=ft.Container(
+                        height=sheet_height,
+                        padding=ft.Padding.symmetric(
+                            horizontal=20, vertical=12
+                        ),
+                        content=ft.Column(
+                            controls=[
+                                ft.Row(
+                                    controls=[
+                                        ft.Text(
+                                            "Escolha o local de retirada",
+                                            size=20,
+                                            weight=ft.FontWeight.BOLD,
+                                            color=INK,
+                                            expand=True,
+                                        ),
+                                        ft.IconButton(
+                                            icon=ft.Icons.CLOSE,
+                                            tooltip="Fechar locais de retirada",
+                                            on_click=lambda _: (
+                                                self.page.pop_dialog()
+                                            ),
+                                        ),
+                                    ],
+                                ),
+                                subtitle,
+                                options_list,
+                            ],
+                            spacing=12,
+                            expand=True,
+                        ),
+                    ),
+                ),
+                scrollable=True,
+                show_drag_handle=True,
+                draggable=True,
+                use_safe_area=True,
+                on_dismiss=self._on_pickup_spot_sheet_dismiss,
+            )
+        else:
+            self.pickup_spot_sheet = ft.AlertDialog(
+                modal=True,
+                title=ft.Text("Escolha o local de retirada"),
+                content=ft.Container(
+                    width=560,
+                    height=460,
+                    content=ft.Column(
+                        controls=[subtitle, options_list],
+                        spacing=12,
+                        expand=True,
+                    ),
+                ),
+                actions=[
+                    ft.TextButton(
+                        "Fechar",
+                        on_click=lambda _: self.page.pop_dialog(),
+                    )
+                ],
+                actions_alignment=ft.MainAxisAlignment.END,
+                on_dismiss=self._on_pickup_spot_sheet_dismiss,
+            )
+        self.page.show_dialog(self.pickup_spot_sheet)
+
+    def _select_pickup_spot(self, pickup_spot_id: str) -> None:
+        try:
+            self.pickup_spot_controller.select_pickup_spot(
+                pickup_spot_id,
+                allow_unavailable=self.is_owner,
+            )
+        except ValueError as exc:
+            self.on_message(str(exc))
+            return
+        self.page.pop_dialog()
+        self.refresh_pickup_spot_options()
+        self.page.update()
+
+    def _on_pickup_spot_sheet_dismiss(self, _=None) -> None:
+        self.pickup_spot_sheet = None
 
     def _pickup_spot_changed(self, event: ft.Event[ft.Dropdown]) -> None:
         try:
@@ -687,35 +908,35 @@ class CatalogView:
             size=12,
             visible=False,
         )
-        self.item_type_dialog = ft.AlertDialog(
-            modal=False,
-            title=ft.Text("Editar sabor" if item_type else "Novo sabor"),
-            content=ft.Container(
-                width=440,
-                content=ft.Column(
-                    controls=[
-                        self.item_type_name,
-                        self.item_type_description,
-                        self.item_type_regular_price,
-                        self.item_type_promotional_price,
-                        ft.Row(
-                            controls=[
-                                ft.OutlinedButton(
-                                    "Adicionar foto",
-                                    icon=ft.Icons.IMAGE_OUTLINED,
-                                    on_click=self._pick_item_type_image,
-                                ),
-                                self.item_type_image_label,
-                            ],
-                            spacing=10,
-                        ),
-                        self.item_type_custom_order,
-                        self.item_type_is_active,
-                        self.item_type_inventory_error,
-                    ],
-                    tight=True,
-                    spacing=12,
-                ),
+        title = "Editar sabor" if item_type else "Novo sabor"
+        self.item_type_dialog = build_adaptive_form_surface(
+            self.page,
+            title=title,
+            content=ft.Column(
+                controls=[
+                    self.item_type_name,
+                    self.item_type_description,
+                    self.item_type_regular_price,
+                    self.item_type_promotional_price,
+                    ft.Row(
+                        controls=[
+                            ft.OutlinedButton(
+                                "Adicionar foto",
+                                icon=ft.Icons.IMAGE_OUTLINED,
+                                on_click=self._pick_item_type_image,
+                            ),
+                            self.item_type_image_label,
+                        ],
+                        spacing=10,
+                        wrap=True,
+                    ),
+                    self.item_type_custom_order,
+                    self.item_type_is_active,
+                    self.item_type_inventory_error,
+                ],
+                spacing=12,
+                scroll=ft.ScrollMode.AUTO,
+                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
             ),
             actions=[
                 ft.TextButton(
@@ -725,7 +946,7 @@ class CatalogView:
                 self.item_type_delete_button,
                 self.item_type_submit_button,
             ],
-            actions_alignment=ft.MainAxisAlignment.END,
+            desktop_width=440,
             on_dismiss=self._on_item_type_form_dismiss,
         )
         self.page.show_dialog(self.item_type_dialog)
@@ -941,24 +1162,81 @@ class CatalogView:
         if not self.is_owner or self.on_remove_stock is None:
             return
 
+        quantity_field = ft.TextField(
+            label="Quantidade para remover",
+            value="1",
+            keyboard_type=ft.KeyboardType.NUMBER,
+            width=240,
+        )
+        error_text = ft.Text(color=ACCENT, size=12, visible=False)
+
         async def confirm(_=None) -> None:
             try:
-                await self.on_remove_stock(cake.id)
+                quantity = int((quantity_field.value or "").strip())
+            except ValueError:
+                error_text.value = "Informe uma quantidade inteira."
+                error_text.visible = True
+                self.page.update()
+                return
+            if quantity < 1:
+                error_text.value = "A quantidade deve ser maior que zero."
+                error_text.visible = True
+                self.page.update()
+                return
+            if quantity > cake.stock:
+                error_text.value = (
+                    f"Há somente {cake.stock} unidades não reservadas."
+                )
+                error_text.visible = True
+                self.page.update()
+                return
+            try:
+                removed = await self.on_remove_stock(cake.id, quantity)
                 self.page.pop_dialog()
                 self.refresh()
                 self.page.update()
-                self.on_notice("Uma unidade não reservada foi removida do estoque.")
+                if removed == 1:
+                    self.on_notice("1 unidade não reservada removida do estoque.")
+                else:
+                    self.on_notice(
+                        f"{removed} unidades não reservadas removidas do estoque."
+                    )
             except (FirebaseRestError, ValueError) as exc:
                 self.page.pop_dialog()
                 self.on_message(str(exc))
 
+        available_units = (
+            "unidade não reservada"
+            if cake.stock == 1
+            else "unidades não reservadas"
+        )
+        reserved_units = (
+            "unidade reservada"
+            if cake.reserved_stock == 1
+            else "unidades reservadas"
+        )
+        stock_message = (
+            f"{cake.name}: {cake.stock} {available_units} e "
+            f"{cake.reserved_stock} {reserved_units}. "
+            "Apenas unidades não reservadas podem ser removidas."
+        )
+        if cake.reserved_stock:
+            stock_message += (
+                " Para remover mais, cancele primeiro uma reserva que "
+                "contenha este sabor."
+            )
         self.page.show_dialog(
             ft.AlertDialog(
                 modal=True,
-                title=ft.Text("Remover uma unidade do estoque?"),
-                content=ft.Text(
-                    f"{cake.name}: {cake.stock} unidades não reservadas. "
-                    "Unidades vinculadas a reservas não podem ser removidas."
+                title=ft.Text("Remover unidades do estoque?"),
+                content=ft.Column(
+                    controls=[
+                        ft.Text(stock_message),
+                        quantity_field,
+                        error_text,
+                    ],
+                    tight=True,
+                    spacing=8,
                 ),
                 actions=[
                     ft.TextButton(

@@ -115,6 +115,23 @@ class MaphiApiClient:
             "DELETE", f"/admin/items/{item_id}", id_token=id_token
         )
 
+    async def remove_items(
+        self, item_type_id: str, quantity: int, id_token: str
+    ) -> int:
+        response = await self._request(
+            "POST",
+            "/admin/items/remove",
+            id_token=id_token,
+            payload={"item_type_id": item_type_id, "quantity": quantity},
+        )
+        result = self._required_object(response, "result")
+        removed = result.get("removed")
+        if type(removed) is not int or removed != quantity:
+            raise FirebaseRestError(
+                "A API retornou uma quantidade inválida de unidades removidas."
+            )
+        return removed
+
     async def create_pickup_spot(
         self, fields: dict, id_token: str
     ) -> dict:

@@ -20,6 +20,7 @@ from features.catalog.catalog_logic import (
     ItemTypeImageCleanupError,
     ItemTypeNameSyncError,
 )
+from features.catalog.catalog_card_view import CatalogCardView
 from features.catalog.catalog_view import CatalogView
 from features.inventory.production_view import ProductionFormView
 from features.pickup_spots.pickup_spots_logic import (
@@ -28,9 +29,11 @@ from features.pickup_spots.pickup_spots_logic import (
 )
 from features.pickup_spots.pickup_spots_view import PickupSpotFormView
 from features.reservations.reservation_logic import (
+    Reservation,
     ReservationController,
     ReservationError,
 )
+from features.reservations.reservation_view import ReservationView
 from firebase_rest import (
     FirebaseFirestoreClient,
     FirebaseRestError,
@@ -573,6 +576,148 @@ async def test_catalog_view_builds_pickup_selector_with_owner_actions():
     assert view.on_reserve.await_count == 2
 
 
+@pytest.mark.parametrize("width", [390, 768, 1280])
+def test_pickup_selector_uses_responsive_surface_and_selects_location(width):
+    pickup_controller = PickupSpotController()
+    pickup_controller.pickup_spots = [
+        PickupSpot(
+            id="centro",
+            name="Loja do Centro",
+            address="Rua A, 123",
+            arrival_at=datetime(
+                2099, 12, 1, 10, 0, tzinfo=ZoneInfo("America/Sao_Paulo")
+            ),
+            departure_at=datetime(
+                2099, 12, 1, 18, 0, tzinfo=ZoneInfo("America/Sao_Paulo")
+            ),
+        )
+    ]
+    page = SimpleNamespace(
+        width=width,
+        height=800,
+        services=[],
+        floating_action_button=None,
+        show_dialog=Mock(),
+        pop_dialog=Mock(),
+        update=Mock(),
+    )
+    view = CatalogView(
+        page=page,
+        controller=CatalogController(),
+        pickup_spot_controller=pickup_controller,
+        account_button=ft.Text("Conta"),
+        on_reserve=AsyncMock(),
+        on_add_stock=AsyncMock(),
+        on_create_pickup_spot=AsyncMock(),
+        on_edit_pickup_spot=AsyncMock(),
+        on_delete_pickup_spot=AsyncMock(),
+        on_create_item_type=AsyncMock(),
+        on_update_item_type=AsyncMock(),
+        on_delete_item_type=AsyncMock(),
+        on_check_item_type_inventory=AsyncMock(),
+        on_notice=Mock(),
+        on_message=Mock(),
+    )
+
+    view.pickup_spot_selector_button.on_click(None)
+
+    sheet = page.show_dialog.call_args.args[0]
+    if width < 768:
+        assert isinstance(sheet, ft.BottomSheet)
+        options = sheet.content.content.content.controls[2]
+    else:
+        assert isinstance(sheet, ft.AlertDialog)
+        options = sheet.content.content.controls[1]
+    assert isinstance(options, ft.ListView)
+    options.controls[0].on_click(None)
+
+    assert pickup_controller.selected_pickup_spot_id == "centro"
+    page.pop_dialog.assert_called_once()
+
+
+def test_mobile_header_places_account_actions_on_a_separate_row():
+    page = SimpleNamespace(
+        width=390,
+        services=[],
+        floating_action_button=None,
+        update=Mock(),
+    )
+    view = CatalogView(
+        page=page,
+        controller=CatalogController(),
+        pickup_spot_controller=PickupSpotController(),
+        account_button=ft.Text("Conta"),
+        on_reserve=AsyncMock(),
+        on_add_stock=AsyncMock(),
+        on_create_pickup_spot=AsyncMock(),
+        on_edit_pickup_spot=AsyncMock(),
+        on_delete_pickup_spot=AsyncMock(),
+        on_create_item_type=AsyncMock(),
+        on_update_item_type=AsyncMock(),
+        on_delete_item_type=AsyncMock(),
+        on_check_item_type_inventory=AsyncMock(),
+        on_notice=Mock(),
+        on_message=Mock(),
+    )
+
+    header = view.root.content.controls[0]
+    assert isinstance(header.content, ft.ResponsiveRow)
+    assert [control.col["xs"] for control in header.content.controls] == [12, 12]
+    assert (
+        view.root.content.horizontal_alignment
+        == ft.CrossAxisAlignment.STRETCH
+    )
+
+
+def test_reservation_card_uses_fluid_width_and_wraps_header_on_mobile():
+    page = SimpleNamespace(update=Mock())
+    view = ReservationView(
+        page,
+        on_back=Mock(),
+        on_cancel=AsyncMock(),
+        on_complete=AsyncMock(),
+        on_delete=AsyncMock(),
+        on_filter=AsyncMock(),
+        on_refresh=AsyncMock(),
+        on_message=Mock(),
+    )
+    reservation = Reservation(
+        id="reservation-12345678",
+        user_id="user-1",
+        user_name="Cliente com nome extenso",
+        pickup_spot_id="centro",
+        pickup_spot_name="Loja do Centro",
+        pickup_spot_address="Rua A, 123, bairro e cidade",
+        pickup_arrival_at=None,
+        pickup_departure_at=None,
+        item_ids=("item-1",),
+        item_type_names=("Sabor de bolo",),
+        unit_prices=(Decimal("10.00"),),
+        total_amount=Decimal("10.00"),
+        sale_type="NORMAL",
+        status="ATIVA",
+        created_at=None,
+    )
+
+    view.set_reservations(
+        [reservation],
+        is_owner=True,
+        pickup_spots=[],
+        selected_pickup_spot_id=None,
+    )
+
+    card = view.list_column.controls[0]
+    header = card.content.controls[0]
+    assert card.width is None
+    assert isinstance(header, ft.ResponsiveRow)
+    assert [control.col["xs"] for control in header.controls] == [12, 12]
+    assert view.list_column.horizontal_alignment == ft.CrossAxisAlignment.STRETCH
+    assert (
+        view.root.content.content.horizontal_alignment
+        == ft.CrossAxisAlignment.STRETCH
+    )
+
+
 def test_pickup_spot_availability_requires_fifteen_minutes_before_closing():
     now = datetime(
         2099, 12, 1, 10, 0, tzinfo=ZoneInfo("America/Sao_Paulo")
@@ -652,6 +797,28 @@ def test_pickup_spot_form_builds_with_calendar_and_time_pickers():
     page.show_dialog.assert_called_once_with(view.dialog)
     view._open_arrival_date_picker()
     assert page.show_dialog.call_args.args[0] is view.arrival_date_picker
+
+
+def test_mobile_pickup_spot_form_uses_fullscreen_bottom_sheet():
+    page = SimpleNamespace(
+        width=390,
+        show_dialog=Mock(),
+        update=Mock(),
+    )
+    view = PickupSpotFormView(
+        page,
+        on_create=AsyncMock(),
+        on_update=AsyncMock(),
+        on_notice=Mock(),
+        on_message=Mock(),
+    )
+
+    view.open_form()
+
+    assert isinstance(view.dialog, ft.BottomSheet)
+    assert view.dialog.fullscreen is True
+    assert view.dialog.show_drag_handle is True
+    page.show_dialog.assert_called_once_with(view.dialog)
 
 
 @pytest.mark.asyncio
@@ -861,6 +1028,40 @@ async def test_production_form_submits_multiple_flavors_and_quantities():
     assert view.dialog is None
 
 
+def test_mobile_production_form_uses_fullscreen_sheet_and_stacked_entries():
+    page = SimpleNamespace(
+        width=390,
+        show_dialog=Mock(),
+        update=Mock(),
+    )
+    view = ProductionFormView(
+        page,
+        on_submit=AsyncMock(),
+        on_notice=Mock(),
+        on_message=Mock(),
+    )
+
+    view.open_form([Cake("chocolate", "Chocolate", "Bolo", 0, "#F0E2D6")])
+
+    assert isinstance(view.dialog, ft.BottomSheet)
+    assert view.dialog.fullscreen is True
+    assert isinstance(view.entries[0].control, ft.Column)
+
+
+@pytest.mark.asyncio
+async def test_mobile_item_type_form_uses_fullscreen_bottom_sheet():
+    view = object.__new__(CatalogView)
+    view.on_message = Mock()
+    view.page = SimpleNamespace(
+        width=390,
+        show_dialog=Mock(),
+        update=Mock(),
+    )
+
+    await view._open_item_type_form()
+
+    assert isinstance(view.item_type_dialog, ft.BottomSheet)
+    assert view.item_type_dialog.fullscreen is True
 
 
 @pytest.mark.asyncio
@@ -906,6 +1107,81 @@ async def test_edit_button_opens_edit_form():
 
     assert len(shown_dialogs) == 1
     assert shown_dialogs[0].title.value == "Editar sabor"
+
+
+@pytest.mark.asyncio
+async def test_remove_stock_confirmation_shows_reserved_count_and_cancellation_guidance():
+    shown_dialogs = []
+    view = object.__new__(CatalogView)
+    view.is_owner = True
+    view.on_remove_stock = AsyncMock(return_value=2)
+    view.on_notice = Mock()
+    view.on_message = Mock()
+    view.refresh = Mock()
+    view.page = SimpleNamespace(
+        show_dialog=shown_dialogs.append,
+        pop_dialog=Mock(),
+        update=Mock(),
+    )
+
+    await view._ask_remove_stock(
+        Cake(
+            "chocolate",
+            "Chocolate",
+            "Bolo",
+            3,
+            "#F0E2D6",
+            reserved_stock=2,
+        )
+    )
+
+    dialog = shown_dialogs[0]
+    content = dialog.content.controls[0].value
+    quantity_field = dialog.content.controls[1]
+    assert "3 unidades não reservadas" in content
+    assert "2 unidades reservadas" in content
+    assert "cancele primeiro uma reserva" in content
+    quantity_field.value = "4"
+    await dialog.actions[1].on_click(None)
+    assert dialog.content.controls[2].visible
+    assert "Há somente 3 unidades não reservadas" in dialog.content.controls[2].value
+    view.on_remove_stock.assert_not_awaited()
+
+    quantity_field.value = "2"
+    await dialog.actions[1].on_click(None)
+    view.on_remove_stock.assert_awaited_once_with("chocolate", 2)
+    view.on_notice.assert_called_once_with(
+        "2 unidades não reservadas removidas do estoque."
+    )
+
+
+def test_remove_stock_button_is_disabled_when_all_units_are_reserved():
+    view = CatalogCardView(
+        Cake(
+            "chocolate",
+            "Chocolate",
+            "Bolo",
+            0,
+            "#F0E2D6",
+            reserved_stock=2,
+        ),
+        quantity=0,
+        is_owner=True,
+        on_quantity_change=lambda _: None,
+        on_remove_stock=AsyncMock(),
+    )
+
+    card = view.build()
+    footer = card.content.content.controls[-1]
+    remove_button = next(
+        control
+        for control in footer.controls
+        if isinstance(control, ft.TextButton)
+    )
+
+    assert remove_button.disabled
+    assert "Reservados: 2" in footer.controls[-1].value
+    assert "cancele uma reserva" in footer.controls[-1].value
 
 
 @pytest.mark.asyncio
@@ -1301,7 +1577,7 @@ async def test_pickup_spot_is_not_deleted_when_reservation_cancellation_fails():
 
 
 @pytest.mark.asyncio
-async def test_reserving_more_than_two_selected_units_creates_multiple_reservations():
+async def test_reserving_multiple_flavors_creates_one_reservation():
     app = object.__new__(MaphiApplication)
     app.auth_controller = SimpleNamespace(
         is_authenticated=True,
@@ -1326,10 +1602,7 @@ async def test_reserving_more_than_two_selected_units_creates_multiple_reservati
     app.is_creating_reservation = False
     app.reservation_controller = SimpleNamespace(
         create_reservation=AsyncMock(
-            side_effect=[
-                SimpleNamespace(total_amount=Decimal("30.00")),
-                SimpleNamespace(total_amount=Decimal("15.00")),
-            ]
+            return_value=SimpleNamespace(total_amount=Decimal("45.00"))
         )
     )
     app.load_database_item_types = AsyncMock()
@@ -1341,14 +1614,13 @@ async def test_reserving_more_than_two_selected_units_creates_multiple_reservati
 
     calls = app.reservation_controller.create_reservation.await_args_list
     assert [call.kwargs["quantities"] for call in calls] == [
-        {"chocolate": 2},
-        {"morango": 1},
+        {"chocolate": 2, "morango": 1},
     ]
     assert app.catalog_controller.quantities == {
         "chocolate": 0,
         "morango": 0,
     }
     app.show_notice.assert_called_once_with(
-        "2 reservas criadas. Valor a pagar: R$ 45,00"
+        "1 reserva criada. Valor a pagar: R$ 45,00"
     )
     app.open_reservations.assert_awaited_once()

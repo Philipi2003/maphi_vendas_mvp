@@ -14,8 +14,8 @@ Incluído no MVP:
 - Publicação e gerenciamento de itens pelo dono.
 - Reservas sem permitir que uma unidade seja reservada duas vezes.
 - Clientes não têm limite total de unidades em reservas ativas.
-- Cada documento de reserva contém até duas unidades; seleções maiores são
-  divididas em várias reservas para que as regras Firestore validem cada item.
+- Todos os sabores e unidades selecionados em uma operação são agrupados em
+  uma reserva SQL; o estoque é validado e alterado na mesma transação.
 - Donos também podem criar reservas para vendas presenciais.
 
 Fora do escopo atual:

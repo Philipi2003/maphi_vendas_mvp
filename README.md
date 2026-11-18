@@ -38,19 +38,43 @@ Sign-in method** e autorize os domínios de teste e produção em **Authenticati
 Settings → Authorized domains**. Nunca coloque OAuth client secrets ou credenciais
 de service account no `.env` do cliente.
 
-## Organização do código
+## Arquitetura MVC e organização do código
+
+O app usa MVC organizado por feature:
+
+- **Model**: entidades e estado de domínio, como `Cake`, `PickupSpot` e
+  `Reservation`, com suas regras e operações de dados nos módulos
+  `src/features/*/*_logic.py`.
+- **Controller**: classes `*Controller` nesses módulos executam as operações
+  da feature. `src/application.py` atua como controller da aplicação: compõe
+  as telas, coordena os controllers, aplica as verificações de acesso e
+  sincroniza as atualizações entre modelo e interface.
+- **View**: módulos `src/features/*/*_view.py` constroem os controles Flet e
+  encaminham ações por callbacks. As Views não fazem chamadas HTTP nem acessam
+  diretamente o PostgreSQL.
+- **Serviços de infraestrutura**: `src/maphi_api.py` concentra as chamadas à
+  Cloud Function; `src/firebase_rest.py` concentra as operações REST usadas
+  com os serviços Firebase.
+
+O fluxo é: **View → controller da aplicação/feature → Model e serviço → View**.
+As classes de modelo e os controllers de cada feature ficam co-localizados em
+`*_logic.py`; essa convenção mantém cada feature reunida sem misturar a
+apresentação com o acesso a dados.
+
+Arquivos principais:
 
 - `src/main.py`: inicializa o app Flet.
 - `src/app_config.py`: configurações da aplicação e tema.
-- `src/application.py`: composição das features e estado compartilhado da aplicação.
-- `src/features/catalog/catalog_view.py`: interface do catálogo.
-- `src/features/catalog/catalog_card_view.py`: apresentação e interações de cada card.
-- `src/features/catalog/catalog_logic.py`: carregamento, filtros e seleção do catálogo.
+- `src/application.py`: controller e composição das features.
+- `src/features/catalog/catalog_view.py` e `catalog_card_view.py`: catálogo e
+  apresentação dos cards.
+- `src/features/catalog/catalog_logic.py`: modelo e controller do catálogo.
 - `src/features/reservations/reservation_view.py` e `reservation_logic.py`:
-  criação, consulta e gestão de reservas.
-- `src/features/auth/auth_view.py`: formulários de login/cadastro e layouts responsivos.
-- `src/features/auth/auth_logic.py`: estado e regras da interface de autenticação.
-- `src/features/auth/account_button_view.py`: botão de login/nome do usuário no cabeçalho.
+  telas, modelo e controller de reservas.
+- `src/features/auth/auth_view.py` e `auth_logic.py`: telas e controller de
+  autenticação.
+- `src/features/auth/account_button_view.py`: componente de apresentação da
+  conta no cabeçalho.
 
 ## Ambiente local (Windows / PowerShell)
 
@@ -184,6 +208,8 @@ Rotas implementadas:
 - `GET|POST /api/v1/reservations` e `POST /api/v1/reservations/{id}/cancel`.
 - `/api/v1/admin/item-types`: `GET`, `POST`, `PATCH` e `DELETE`.
 - `/api/v1/admin/items`: `GET`, `POST`, `PATCH` e `DELETE`.
+- `POST /api/v1/admin/items/remove`: remove atomicamente uma quantidade
+  informada de unidades não reservadas de um sabor.
 - `/api/v1/admin/pickup-spots`: `GET`, `POST`, `PATCH` e `DELETE`.
 - `/api/v1/admin/reservations`: `GET`, `PATCH` e `DELETE`.
 - As rotas `/api/v1/admin/...` exigem `public.users.role = 'DONO'`.
@@ -194,11 +220,17 @@ verifica o token com Firebase Admin e busca o papel no banco; o cliente não pod
 se promover a dono. O login/cadastro continua no Firebase Authentication e o
 perfil com papel é obtido pela rota `/profile`.
 
+Na listagem administrativa de sabores, `stock` conta unidades disponíveis e
+`reserved_stock` conta unidades vinculadas a reservas ativas. O botão de remoção
+altera apenas unidades disponíveis; para remover estoque que está reservado, o
+dono precisa cancelar primeiro uma reserva que contenha aquele sabor.
+
 O corpo de `POST /api/v1/reservations` usa `pickup_spot_id` e uma lista de
 `items`, cada qual com `item_type_id` e `quantity`. O preço aplicável e as
 unidades de estoque são definidos pelo servidor, dentro da transação do banco,
-e gravados como snapshots. Uma reserva pode conter até duas unidades. O corpo
-de `POST /api/v1/admin/items` aceita `items` com pares
+e gravados como snapshots. Todos os sabores e unidades selecionados são
+gravados em uma única reserva e processados na mesma transação. O corpo de
+`POST /api/v1/admin/items` aceita `items` com pares
 `item_type_id`/`quantity` (até 500 unidades por lote) e `expiration_at`
 opcional por sabor. As datas de locais devem ser ISO 8601 com fuso horário.
 Excluir reservas e locais é lógico para preservar o histórico; excluir um

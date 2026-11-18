@@ -33,6 +33,7 @@ class Cake:
     regular_price: float | None = None
     promotional_price: float | None = None
     is_active: bool = True
+    reserved_stock: int = 0
 
 
 class CatalogController:
@@ -83,6 +84,7 @@ class CatalogController:
                     else None
                 ),
                 is_active=bool(row.get("is_active")),
+                reserved_stock=int(row.get("reserved_stock") or 0),
             )
             if cake.name:
                 cakes.append(cake)
@@ -178,9 +180,9 @@ class CatalogController:
         ]
         return total_units
 
-    async def remove_available_unit(
-        self, item_type_id: str, id_token: str
-    ) -> None:
+    async def remove_available_units(
+        self, item_type_id: str, quantity: int, id_token: str
+    ) -> int:
         if not id_token:
             raise ValueError("Entre com uma conta de dono para remover estoque.")
         cake = next(
@@ -188,28 +190,24 @@ class CatalogController:
         )
         if cake is None:
             raise ValueError("O sabor não foi encontrado no catálogo.")
-
-        available = await self.api_client.list_items(
-            id_token=id_token,
-            item_type_id=item_type_id,
-            status="DISPONIVEL",
-            limit=1,
-        )
-        if not available:
+        if type(quantity) is not int or not 1 <= quantity <= cake.stock:
             raise ValueError(
-                "Não há unidades não reservadas deste sabor para remover."
+                "A quantidade deve estar entre 1 e o total não reservado."
             )
-        await self.api_client.delete_item(str(available[0]["id"]), id_token)
+        removed = await self.api_client.remove_items(
+            item_type_id, quantity, id_token
+        )
 
         self.cakes = [
-            replace(cake, stock=max(0, cake.stock - 1))
+            replace(cake, stock=max(0, cake.stock - removed))
             if cake.id == item_type_id
             else cake
             for cake in self.cakes
         ]
         self.quantities[item_type_id] = min(
-            self.quantities.get(item_type_id, 0), max(0, cake.stock - 1)
+            self.quantities.get(item_type_id, 0), max(0, cake.stock - removed)
         )
+        return removed
 
     async def create_item_type(
         self,
@@ -360,6 +358,7 @@ class CatalogController:
                 else None
             ),
             is_active=is_active,
+            reserved_stock=existing.reserved_stock,
         )
         index = self.cakes.index(existing)
         self.cakes[index] = updated

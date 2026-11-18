@@ -1,4 +1,5 @@
 import json
+from uuid import UUID
 
 import pytest
 from firebase_admin import auth as firebase_auth
@@ -8,7 +9,11 @@ from api import (
     ApiError,
     _create_items,
     _create_reservation,
+    _delete_item,
+    _list_item_types,
     _only_fields,
+    _remove_items,
+    _reservation_quantities,
     _resolve_private_route,
     _sync_firebase_storage_role,
     _timestamp,
@@ -165,21 +170,22 @@ def test_unknown_fields_are_named_in_the_validation_error():
     assert exc_info.value.code == "unknown_fields"
 
 
-def test_reservations_cannot_exceed_two_units_before_database_access():
-    with pytest.raises(ApiError, match="no máximo 2 unidades"):
-        _create_reservation(
-            connection=None,
-            claims={"uid": "user-1"},
-            payload={
-                "pickup_spot_id": "00000000-0000-0000-0000-000000000001",
-                "items": [
-                    {
-                        "item_type_id": "00000000-0000-0000-0000-000000000002",
-                        "quantity": 3,
-                    }
-                ],
+def test_reservation_accepts_multiple_flavors_and_units_as_one_request():
+    quantities = _reservation_quantities(
+        [
+            {
+                "item_type_id": "00000000-0000-0000-0000-000000000002",
+                "quantity": 2,
             },
-        )
+            {
+                "item_type_id": "00000000-0000-0000-0000-000000000003",
+                "quantity": 2,
+            },
+        ]
+    )
+
+    assert len(quantities) == 2
+    assert sum(quantities.values()) == 4
 
 
 def test_stock_batches_cannot_exceed_500_units_before_database_access():
@@ -236,3 +242,117 @@ def test_storage_role_mirror_uses_the_supabase_profile_role(monkeypatch):
     _sync_firebase_storage_role({"auth_uid": "owner-uid", "role": "DONO"})
 
     assert document.value == ({"role": "DONO"}, True)
+
+
+def test_admin_item_types_include_available_and_reserved_stock_counts():
+    class Result:
+        def fetchall(self):
+            return [
+                {
+                    "id": "type-1",
+                    "name": "Brigadeiro",
+                    "stock": 3,
+                    "reserved_stock": 2,
+                }
+            ]
+
+    class Connection:
+        def execute(self, query):
+            assert "i.status = 'DISPONIVEL'" in query
+            assert "i.status = 'RESERVADO'" in query
+            return Result()
+
+    rows = _list_item_types(Connection())
+
+    assert rows[0]["stock"] == 3
+    assert rows[0]["reserved_stock"] == 2
+
+
+def test_reserved_item_cannot_be_removed_from_stock():
+    class Result:
+        def __init__(self, row):
+            self.row = row
+
+        def fetchone(self):
+            return self.row
+
+    class Connection:
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, query, params):
+            self.calls += 1
+            if self.calls == 1:
+                assert "status = 'DISPONIVEL'" in query
+                return Result(None)
+            return Result({"status": "RESERVADO"})
+
+    with pytest.raises(ApiError, match="Somente unidades disponíveis"):
+        _delete_item(
+            Connection(),
+            UUID("00000000-0000-0000-0000-000000000001"),
+        )
+
+
+def test_bulk_removal_changes_only_the_requested_available_units():
+    class Result:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def fetchall(self):
+            return self.rows
+
+    class Connection:
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, query, params):
+            self.calls += 1
+            if self.calls == 1:
+                assert "status = 'DISPONIVEL'" in query
+                assert params[1] == 2
+                return Result([{"id": "unit-1"}, {"id": "unit-2"}])
+            assert "status = 'DISPONIVEL'" in query
+            assert "SET status = 'REMOVIDO'" in query
+            return Result([{"id": "unit-1"}, {"id": "unit-2"}])
+
+    result = _remove_items(
+        Connection(),
+        {
+            "item_type_id": "00000000-0000-0000-0000-000000000001",
+            "quantity": 2,
+        },
+    )
+
+    assert result["removed"] == 2
+
+
+def test_bulk_removal_fails_without_removing_a_partial_quantity():
+    class Result:
+        def fetchall(self):
+            return [{"id": "unit-1"}]
+
+    class Connection:
+        calls = 0
+
+        def execute(self, query, params):
+            self.calls += 1
+            return Result()
+
+    connection = Connection()
+    with pytest.raises(ApiError, match="estoque não reservado mudou"):
+        _remove_items(
+            connection,
+            {
+                "item_type_id": "00000000-0000-0000-0000-000000000001",
+                "quantity": 2,
+            },
+        )
+    assert connection.calls == 1
+
+
+def test_bulk_removal_route_is_available_to_admin_items_endpoint():
+    assert (
+        _resolve_private_route("/api/v1/admin/items/remove", "POST")
+        == "admin_items_remove"
+    )

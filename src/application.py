@@ -1,5 +1,3 @@
-from decimal import Decimal
-
 import flet as ft
 
 from app_config import INK, MUTED, configure_page
@@ -14,7 +12,6 @@ from features.pickup_spots.pickup_spots_logic import (
 )
 from features.pickup_spots.pickup_spots_view import PickupSpotFormView
 from features.reservations.reservation_logic import (
-    MAX_UNITS_PER_RESERVATION,
     ReservationController,
     ReservationError,
 )
@@ -521,68 +518,25 @@ class MaphiApplication:
         id_token = self.auth_controller.id_token
         if not id_token:
             raise ReservationError("Entre na sua conta para reservar bolos.")
-        reservation_groups: list[dict[str, int]] = []
-        current_group: dict[str, int] = {}
-        current_group_size = 0
-        for item_type_id, quantity in quantities.items():
-            for _ in range(quantity):
-                current_group[item_type_id] = (
-                    current_group.get(item_type_id, 0) + 1
-                )
-                current_group_size += 1
-                if current_group_size == MAX_UNITS_PER_RESERVATION:
-                    reservation_groups.append(current_group)
-                    current_group = {}
-                    current_group_size = 0
-        if current_group:
-            reservation_groups.append(current_group)
+        try:
+            reservation = await self.reservation_controller.create_reservation(
+                quantities=quantities,
+                pickup_spot_id=pickup_spot_id,
+                id_token=id_token,
+            )
+        except (FirebaseRestError, ReservationError, ValueError) as exc:
+            self.catalog_controller.quantities = quantities.copy()
+            await self.load_database_item_types()
+            self.show_message(f"Não foi possível criar a reserva: {exc}")
+            return
 
-        created_reservations = []
-        remaining_quantities = quantities.copy()
-        for group in reservation_groups:
-            try:
-                reservation = (
-                    await self.reservation_controller.create_reservation(
-                        quantities=group,
-                        pickup_spot_id=pickup_spot_id,
-                        id_token=id_token,
-                    )
-                )
-            except (FirebaseRestError, ReservationError, ValueError) as exc:
-                self.catalog_controller.quantities = remaining_quantities
-                await self.load_database_item_types()
-                if created_reservations:
-                    created_count = len(created_reservations)
-                    created_label = (
-                        f"{created_count} reserva foi criada"
-                        if created_count == 1
-                        else f"{created_count} reservas foram criadas"
-                    )
-                    self.show_message(
-                        f"{created_label}, mas as demais falharam: {exc}"
-                    )
-                    await self.open_reservations()
-                else:
-                    self.show_message(f"Não foi possível criar a reserva: {exc}")
-                return
-            created_reservations.append(reservation)
-            for item_type_id, quantity in group.items():
-                remaining_quantities[item_type_id] -= quantity
-
-        self.catalog_controller.quantities = remaining_quantities
+        self.catalog_controller.quantities = {
+            item_type_id: 0 for item_type_id in quantities
+        }
         await self.load_database_item_types()
-        total_amount = sum(
-            (reservation.total_amount for reservation in created_reservations),
-            start=Decimal("0.00"),
-        )
-        formatted_total = f"{total_amount:.2f}".replace(".", ",")
-        created_label = (
-            "1 reserva criada"
-            if len(created_reservations) == 1
-            else f"{len(created_reservations)} reservas criadas"
-        )
+        formatted_total = f"{reservation.total_amount:.2f}".replace(".", ",")
         self.show_notice(
-            f"{created_label}. Valor a pagar: R$ {formatted_total}"
+            f"1 reserva criada. Valor a pagar: R$ {formatted_total}"
         )
         await self.open_reservations()
 
@@ -607,14 +561,21 @@ class MaphiApplication:
         self.page.update()
         return total_units
 
-    async def remove_available_stock(self, item_type_id: str) -> None:
+    async def remove_available_stock(
+        self, item_type_id: str, quantity: int
+    ) -> int:
         if not self.auth_controller.is_owner or not self.auth_controller.id_token:
             raise ValueError("Apenas o dono pode remover unidades do estoque.")
-        await self.catalog_controller.remove_available_unit(
-            item_type_id, self.auth_controller.id_token
-        )
+        try:
+            removed = await self.catalog_controller.remove_available_units(
+                item_type_id, quantity, self.auth_controller.id_token
+            )
+        except (FirebaseRestError, ValueError):
+            await self.load_database_item_types()
+            raise
         self.catalog_view.refresh()
         self.page.update()
+        return removed
 
 
 def create_application(page: ft.Page) -> MaphiApplication:

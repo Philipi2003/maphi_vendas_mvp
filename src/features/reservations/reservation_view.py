@@ -1,6 +1,15 @@
 import flet as ft
 
-from app_config import ACCENT, BACKGROUND, BORDER, GREEN, INK, MUTED, SURFACE
+from app_config import (
+    ACCENT,
+    BACKGROUND,
+    BORDER,
+    BREAKPOINT_TABLET,
+    GREEN,
+    INK,
+    MUTED,
+    SURFACE,
+)
 from features.pickup_spots.pickup_spots_logic import LOCAL_TIMEZONE, PickupSpot
 from features.reservations.reservation_logic import Reservation
 from firebase_rest import FirebaseRestError
@@ -36,15 +45,20 @@ class ReservationView:
             size=24,
             weight=ft.FontWeight.BOLD,
             color=INK,
+            max_lines=1,
+            overflow=ft.TextOverflow.ELLIPSIS,
+            expand=True,
         )
         self.filter_dropdown = ft.Dropdown(
             label="Filtrar por local",
-            width=360,
             on_select=self._filter_changed,
             options=[],
             visible=False,
         )
-        self.list_column = ft.Column(spacing=12, expand=True)
+        self.list_column = ft.Column(
+            spacing=12,
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+        )
         self.root = ft.Container(
             visible=False,
             expand=True,
@@ -53,22 +67,33 @@ class ReservationView:
                 expand=True,
                 content=ft.Column(
                     controls=[
-                        ft.Row(
+                        ft.ResponsiveRow(
                             controls=[
-                                ft.IconButton(
-                                    icon=ft.Icons.ARROW_BACK,
-                                    tooltip="Voltar ao catálogo",
-                                    on_click=lambda _: self.close(),
+                                ft.Container(
+                                    col={"xs": 9, "md": 10},
+                                    content=ft.Row(
+                                        controls=[
+                                            ft.IconButton(
+                                                icon=ft.Icons.ARROW_BACK,
+                                                tooltip="Voltar ao catálogo",
+                                                on_click=lambda _: self.close(),
+                                            ),
+                                            self.title,
+                                        ],
+                                        spacing=8,
+                                    ),
                                 ),
-                                self.title,
-                                ft.Container(expand=True),
-                                ft.IconButton(
-                                    icon=ft.Icons.REFRESH,
-                                    tooltip="Atualizar reservas",
-                                    on_click=lambda _: self.on_refresh(),
+                                ft.Container(
+                                    col={"xs": 3, "md": 2},
+                                    alignment=ft.Alignment.CENTER_RIGHT,
+                                    content=ft.IconButton(
+                                        icon=ft.Icons.REFRESH,
+                                        tooltip="Atualizar reservas",
+                                        on_click=lambda _: self.on_refresh(),
+                                    ),
                                 ),
                             ],
-                            spacing=8,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
                         ),
                         self.filter_dropdown,
                         self.list_column,
@@ -76,10 +101,10 @@ class ReservationView:
                     spacing=16,
                     scroll=ft.ScrollMode.AUTO,
                     expand=True,
-                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                    horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
                 ),
             ),
-            padding=ft.Padding.symmetric(horizontal=20, vertical=16),
+            padding=ft.Padding.symmetric(horizontal=16, vertical=16),
         )
 
     def open(self) -> None:
@@ -261,20 +286,31 @@ class ReservationView:
         return ft.Container(
             content=ft.Column(
                 controls=[
-                    ft.Row(
+                    ft.ResponsiveRow(
                         controls=[
-                            ft.Text(
-                                f"Reserva #{reservation.id[:8]}",
-                                weight=ft.FontWeight.BOLD,
-                                color=INK,
+                            ft.Container(
+                                col={"xs": 12, "sm": 7},
+                                content=ft.Text(
+                                    f"Reserva #{reservation.id[:8]}",
+                                    weight=ft.FontWeight.BOLD,
+                                    color=INK,
+                                    max_lines=1,
+                                    overflow=ft.TextOverflow.ELLIPSIS,
+                                ),
                             ),
-                            ft.Container(expand=True),
-                            ft.Text(
-                                reservation.status_label,
-                                color=status_color,
-                                weight=ft.FontWeight.W_600,
+                            ft.Container(
+                                col={"xs": 12, "sm": 5},
+                                alignment=ft.Alignment.CENTER_RIGHT,
+                                content=ft.Text(
+                                    reservation.status_label,
+                                    color=status_color,
+                                    weight=ft.FontWeight.W_600,
+                                    text_align=ft.TextAlign.RIGHT,
+                                ),
                             ),
-                        ]
+                        ],
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        run_spacing=4,
                     ),
                     *details,
                     ft.Row(
@@ -285,8 +321,8 @@ class ReservationView:
                 ],
                 spacing=8,
                 tight=True,
+                horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
             ),
-            width=760,
             padding=18,
             bgcolor=SURFACE,
             border=ft.Border.all(1, BORDER),

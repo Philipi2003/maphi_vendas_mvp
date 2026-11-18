@@ -12,6 +12,25 @@ from features.pickup_spots.pickup_spots_logic import (
     PickupSpotController,
 )
 from features.reservations.reservation_logic import ReservationController
+from maphi_api import MaphiApiClient
+
+
+@pytest.mark.asyncio
+async def test_remove_items_api_sends_bulk_quantity():
+    client = MaphiApiClient()
+    client._request = AsyncMock(return_value={"result": {"removed": 3}})
+
+    removed = await client.remove_items(
+        "type-1", 3, "owner-token"
+    )
+
+    assert removed == 3
+    client._request.assert_awaited_once_with(
+        "POST",
+        "/admin/items/remove",
+        id_token="owner-token",
+        payload={"item_type_id": "type-1", "quantity": 3},
+    )
 
 
 @pytest.mark.asyncio
@@ -52,6 +71,7 @@ async def test_catalog_maps_supabase_fields_and_stock():
                 "is_custom_order_only": False,
                 "is_active": True,
                 "stock": 3,
+                "reserved_stock": 2,
             }
         ]
     )
@@ -69,6 +89,7 @@ async def test_catalog_maps_supabase_fields_and_stock():
             regular_price=45,
             promotional_price=39.9,
             is_active=True,
+            reserved_stock=2,
         )
     ]
 
@@ -150,6 +171,7 @@ async def test_item_type_update_clears_promotion_on_server():
         "#F0E2D6",
         regular_price=45,
         promotional_price=39.9,
+        reserved_stock=2,
     )
     controller = CatalogController([cake])
     controller.api_client.update_item_type = AsyncMock(return_value={})
@@ -167,33 +189,40 @@ async def test_item_type_update_clears_promotion_on_server():
     )
 
     assert updated.promotional_price is None
+    assert updated.reserved_stock == 2
     fields = controller.api_client.update_item_type.await_args.args[1]
     assert fields["regular_price"] == 45.0
     assert fields["promotional_price"] is None
 
 
 @pytest.mark.asyncio
-async def test_removing_stock_deletes_only_an_available_unit():
+async def test_removing_multiple_available_units_preserves_reserved_count():
     controller = CatalogController(
-        [Cake("type-1", "Brigadeiro", "", 2, "#F0E2D6")]
+        [
+            Cake(
+                "type-1",
+                "Brigadeiro",
+                "",
+                5,
+                "#F0E2D6",
+                reserved_stock=2,
+            )
+        ]
     )
-    controller.api_client.list_items = AsyncMock(
-        return_value=[{"id": "unit-1"}]
-    )
-    controller.api_client.delete_item = AsyncMock(return_value=None)
+    controller.quantities["type-1"] = 4
+    controller.api_client.remove_items = AsyncMock(return_value=3)
 
-    await controller.remove_available_unit("type-1", "owner-token")
+    removed = await controller.remove_available_units(
+        "type-1", 3, "owner-token"
+    )
 
-    controller.api_client.list_items.assert_awaited_once_with(
-        id_token="owner-token",
-        item_type_id="type-1",
-        status="DISPONIVEL",
-        limit=1,
+    assert removed == 3
+    controller.api_client.remove_items.assert_awaited_once_with(
+        "type-1", 3, "owner-token"
     )
-    controller.api_client.delete_item.assert_awaited_once_with(
-        "unit-1", "owner-token"
-    )
-    assert controller.cakes[0].stock == 1
+    assert controller.cakes[0].stock == 2
+    assert controller.cakes[0].reserved_stock == 2
+    assert controller.quantities["type-1"] == 2
 
 
 @pytest.mark.asyncio
@@ -252,7 +281,7 @@ async def test_pickup_spots_decode_and_encode_timestamp_fields():
 
 
 @pytest.mark.asyncio
-async def test_reservation_sends_quantities_and_decodes_server_price_snapshots():
+async def test_reservation_sends_multiple_flavors_in_one_request():
     controller = ReservationController()
     controller.api_client.create_reservation = AsyncMock(
         return_value={
@@ -270,9 +299,15 @@ async def test_reservation_sends_quantities_and_decodes_server_price_snapshots()
                     "item_type_id": "type-1",
                     "item_type_name": "Brigadeiro",
                     "unit_price": 39.9,
-                }
+                },
+                {
+                    "item_id": "unit-2",
+                    "item_type_id": "type-2",
+                    "item_type_name": "Morango",
+                    "unit_price": 45,
+                },
             ],
-            "total_amount": 39.9,
+            "total_amount": 84.9,
             "sale_type": "PROMOCAO",
             "status": "ATIVA",
             "created_at": "2099-11-30T12:00:00+00:00",
@@ -280,17 +315,20 @@ async def test_reservation_sends_quantities_and_decodes_server_price_snapshots()
     )
 
     reservation = await controller.create_reservation(
-        quantities={"type-1": 1},
+        quantities={"type-1": 2, "type-2": 1},
         pickup_spot_id="spot-1",
         id_token="firebase-token",
     )
 
-    assert reservation.total_amount == Decimal("39.90")
-    assert reservation.item_ids == ("unit-1",)
+    assert reservation.total_amount == Decimal("84.90")
+    assert reservation.item_ids == ("unit-1", "unit-2")
     controller.api_client.create_reservation.assert_awaited_once_with(
         {
             "pickup_spot_id": "spot-1",
-            "items": [{"item_type_id": "type-1", "quantity": 1}],
+            "items": [
+                {"item_type_id": "type-1", "quantity": 2},
+                {"item_type_id": "type-2", "quantity": 1},
+            ],
         },
         "firebase-token",
     )
