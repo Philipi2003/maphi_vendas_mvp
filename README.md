@@ -76,6 +76,23 @@ Arquivos principais:
 - `src/features/auth/account_button_view.py`: componente de apresentação da
   conta no cabeçalho.
 
+## Testes
+
+Os testes do app espelham a organização do código:
+
+- `tests/application/`: coordenação da aplicação.
+- `tests/features/<feature>/`: testes de autenticação, catálogo, estoque,
+  locais de retirada e reservas.
+- `tests/infrastructure/`: integrações com serviços externos.
+- `tests/config/`: carregamento de configuração.
+
+Execute toda a suíte ou uma feature específica com:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest
+.\.venv\Scripts\python.exe -m pytest tests\features\catalog
+```
+
 ## Ambiente local (Windows / PowerShell)
 
 ```powershell

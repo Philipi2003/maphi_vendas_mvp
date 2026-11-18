@@ -1,100 +1,99 @@
-# Contexto de continuidade do MaphiApp
+# Continuidade do MaphiApp
 
-Este arquivo registra o estado de desenvolvimento e as decisões tomadas nas conversas de trabalho, para retomar o projeto em outra sessão ou computador. Os documentos de visão e implementação continuam em `maphiapp_context.md` e `gemini_context.md`.
+Atualizado em 18/11/2026.
 
-## Objetivo e escopo
+## Objetivo e decisões atuais
 
-O MaphiApp é um MVP para divulgar bolos disponíveis e permitir que clientes reservem unidades. A aplicação está sendo construída em Python com Flet e Firebase.
+O MaphiApp é um aplicativo de catálogo e venda de bolos, com acesso de cliente
+e administração do dono. A persistência transacional foi migrada de Firestore
+para PostgreSQL no Supabase, atendendo à exigência de banco SQL e mantendo o
+projeto dentro do uso pretendido de baixo custo. Firebase Authentication e
+Firebase Storage continuam em uso.
 
-Incluído no MVP:
+O cliente não acessa a API REST do Supabase. As operações de catálogo, estoque,
+locais de retirada, reservas e perfis passam pela Cloud Function, que valida o
+Firebase ID token e acessa PostgreSQL diretamente no servidor. O papel
+autoritativo está em `public.users.role`; a Function sincroniza esse papel em
+`users/{uid}` no Firestore exclusivamente para as regras de acesso às imagens no
+Firebase Storage.
 
-- Catálogo público de bolos, incluindo itens disponíveis e esgotados.
-- Seleção de quantidade para itens disponíveis e início do fluxo de reserva.
-- Autenticação de clientes e conta de dono.
-- Publicação e gerenciamento de itens pelo dono.
-- Reservas sem permitir que uma unidade seja reservada duas vezes.
-- Clientes não têm limite total de unidades em reservas ativas.
-- Todos os sabores e unidades selecionados em uma operação são agrupados em
-  uma reserva SQL; o estoque é validado e alterado na mesma transação.
-- Donos também podem criar reservas para vendas presenciais.
+## Arquitetura
 
-Fora do escopo atual:
+O app segue MVC organizado por feature, sem uma migração estrutural pendente:
 
-- Encomendas de bolos.
-- Limite máximo de reservas por cliente.
+- Views Flet ficam em `*_view.py`.
+- Models, regras de negócio e controllers das features ficam principalmente em
+  `*_logic.py`.
+- `MaphiApplication` coordena navegação, permissões e sincronização entre
+  features.
+- `maphi_api.py` concentra as chamadas autenticadas à Cloud Function.
+- Firebase Authentication e Storage permanecem na integração Firebase do app.
 
-## Stack e infraestrutura
+O README contém o mapeamento mais detalhado das responsabilidades e os passos de
+configuração: [README.md](../README.md).
 
-- Python e Flet para a interface.
-- Firebase Hosting para publicar o build web, gerado em `build/web`.
-- Firebase Authentication e Cloud Firestore previstos para autenticação e dados.
-- A configuração Firebase do projeto está associada ao projeto `maphivendas`.
-- `firebase.json` configura Hosting e Firestore Rules.
-- As regras ficam em `firestore.rules`. Elas identificam o dono pelo campo `users/{uid}.role == "DONO"`; o próprio usuário não pode definir ou alterar seu papel.
-- O SDK `firebase-admin` não deve ser usado no cliente WebAssembly. A estratégia documentada para o cliente é chamar as APIs REST do Firebase e confiar nas Security Rules. Não colocar segredos no código cliente.
+## Backend e dados
 
-## Estado atual
+- A implementação da API está em `functions/api.py`; ela usa Firebase Admin
+  para validar tokens e `psycopg` para conversar diretamente com PostgreSQL.
+- O schema para bancos novos está em `context/schema_supabase.sql`.
+- A migração de bancos existentes está em
+  `context/migration_supabase_app_alignment.sql`. Ela não inventa preços:
+  sabores sem preço precisam ser corrigidos antes de aceitar reservas.
+- As tabelas habilitam RLS sem políticas para bloquear acesso pela Data API do
+  Supabase; o backend usa uma conexão de servidor.
+- O segredo `SUPABASE_DB_URL` deve ficar no Secret Manager, não no app nem no
+  repositório. `functions/.env` é reservado às configurações Web públicas do
+  Firebase no formato dotenv.
+- As rotas privadas exigem `Authorization: Bearer <Firebase ID token>`. A
+  autorização de operações administrativas é verificada pela role no banco.
+- Uma reserva com vários sabores/unidades é criada como uma única reserva e
+  processada na mesma transação. Preço, cliente e local são preservados em
+  snapshots.
+- O estoque administrativo distingue unidades disponíveis e reservadas. A
+  remoção em lote altera atomicamente apenas unidades disponíveis; para remover
+  unidades reservadas, o dono precisa primeiro cancelar a reserva relacionada.
+- O endpoint de cadastro de estoque aceita lotes de até 500 unidades por sabor.
+- As datas dos locais devem incluir fuso horário; as janelas de retirada têm
+  duração mínima de 15 minutos.
 
-O projeto está modularizado por feature:
+## App e responsividade
 
-- `src/main.py`: inicialização do Flet.
-- `src/app_config.py`: configuração e tema da aplicação.
-- `src/application.py`: composição das features e coordenação de eventos compartilhados.
-- `src/features/catalog/catalog_view.py` e `catalog_logic.py`: interface e lógica do catálogo demonstrativo.
-- `src/features/auth/auth_view.py` e `auth_logic.py`: interface responsiva e estado demonstrativo da autenticação.
-- `src/features/auth/account_button_view.py`: botão “Entrar”/nome do usuário no cabeçalho, pertencente à feature de autenticação.
+- O catálogo, estoque, locais, reservas e perfis carregam pela Cloud Function.
+- A autenticação continua no Firebase Authentication; imagens continuam no
+  Firebase Storage.
+- A interface é mobile-first. Abaixo de 768 px, a escolha de local de retirada
+  usa BottomSheet; em tablet e desktop usa AlertDialog.
+- Cadastro de produção, novo local e novo sabor abrem formulários adaptáveis em
+  tela cheia no mobile e mantêm o diálogo em telas maiores.
+- Os cards de reserva usam largura fluida e conteúdo/ações adaptáveis para
+  evitar textos cortados em mobile.
 
-Autenticação, catálogo, estoque, locais de retirada e reservas estão conectados ao
-Firebase pelas APIs REST. A sessão salva o refresh token nas preferências do
-dispositivo; a senha não é persistida. Reservas criam, cancelam e finalizam
-unidades em transações Firestore, preservando o vínculo entre item e reserva.
-Clientes veem as próprias reservas; donos veem todas, filtram por local,
-cancelam, concluem vendas e removem reservas terminais. Ao remover um local, o
-app o desativa, cancela as reservas ativas e só então o exclui.
+## Validação recente
 
-O login/cadastro abre como tela dedicada em larguras menores que 768 px e como modal em telas maiores ou iguais a 768 px. O modal pode ser fechado clicando fora e possui botão de fechar; a tela de cadastro também possui botão de fechar.
+- A última suíte executada após os ajustes responsivos passou com 70 testes.
+- Os testes do app agora espelham a organização por feature em
+  `tests/features/`, com diretórios separados para aplicação, configuração e
+  infraestrutura.
+- Após a reorganização dos arquivos, os mesmos 70 testes passaram novamente.
+- O build web Flet terminou com sucesso.
+- `git diff --check` passou.
+- A documentação MVC foi atualizada no README.
 
-As regras Firestore autorizam as transições da reserva e do estoque em conjunto.
-Elas devem ser publicadas no projeto Firebase antes de usar a funcionalidade em
-produção.
+Esses resultados são da árvore local. Não há confirmação de que o schema ou a
+migração tenham sido aplicados no Supabase, nem de que as alterações mais
+recentes da API e do app tenham sido publicadas. Versões anteriores podem já
+estar implantadas; confira o estado remoto antes de fazer novo deploy.
 
-## Decisões de arquitetura e produto
+## Próximos passos ao retomar
 
-- Manter `main.py` restrito à inicialização; código de tela e lógica ficam separados por feature.
-- O botão de conta do cabeçalho pertence à autenticação; o catálogo recebe o controle pronto, sem conhecer seus detalhes.
-- O catálogo é público; operações protegidas dependem de autenticação e autorização.
-- Não criar documentos fictícios apenas para materializar coleções Firestore: as coleções aparecem quando o primeiro documento é gravado.
-- Não tratar uma operação como concluída se ela ainda for apenas uma demonstração de interface.
+1. Verificar no Supabase se o schema atual ou a migração de alinhamento já foi
+   aplicado; preencher preços existentes que ainda estejam nulos.
+2. Conferir os segredos e a configuração Firebase, sem copiar credenciais para
+   o repositório.
+3. Publicar a Cloud Function e o Hosting quando banco e configuração estiverem
+   prontos. Publicar somente Hosting não atualiza a Function.
+4. Fazer um teste integrado de login, perfil, catálogo, estoque, reserva com
+   vários sabores, cancelamento e fluxo de imagens.
 
-## Próximos passos recomendados
-
-1. Publicar e validar as regras Firestore atualizadas no projeto Firebase.
-2. Confirmar que a conta do dono tem `users/{uid}.role == "DONO"` atribuído
-   administrativamente no Console do Firebase.
-3. Testar no ambiente Firebase de produção os fluxos de reserva, cancelamento,
-   conclusão da venda e exclusão de locais com reservas.
-
-## Desenvolvimento local
-
-No Windows PowerShell, o README documenta a criação do ambiente virtual e execução com:
-
-```powershell
-py -m venv .venv
-.\.venv\Scripts\python.exe -m pip install "flet>=1.1.2"
-.\.venv\Scripts\flet.exe run --web
-```
-
-Para build web, definir `$env:PYTHONUTF8 = "1"` antes de executar:
-
-```powershell
-.\.venv\Scripts\flet.exe build web
-```
-
-O deploy de Hosting e das regras exige Firebase CLI instalada e autenticada no computador. Não versionar credenciais, tokens ou arquivos de configuração privada.
-
-## Como retomar
-
-1. Ler este arquivo e depois `README.md`.
-2. Consultar `maphiapp_context.md` e `gemini_context.md` para requisitos e contexto técnico originais.
-3. Verificar os arquivos e o estado atual do projeto antes de implementar; este resumo pode ficar desatualizado.
-4. Próxima tarefa sugerida: integrar Firebase Authentication mantendo a arquitetura por feature e verificando build/testes focados.
+Consulte [README.md](../README.md) para os comandos de deploy e configuração.
