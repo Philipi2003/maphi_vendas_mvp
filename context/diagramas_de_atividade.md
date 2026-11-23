@@ -193,9 +193,11 @@ flowchart TD
     H -->|Nao| I[Exibir selecione ao menos um bolo]
     I --> D
 
-    H -->|Sim| J[Impede envio duplicado]
-    J --> K[POST /api/v1/reservations]
-    K --> L[Verificar Bearer idToken]
+    H -->|Sim| J{Envio ja em andamento?}
+    J -->|Sim| J1[Ignorar novo clique]
+    J1 --> D
+    J -->|Nao| K[Impedir novos envios enquanto aguarda]
+    K --> L[POST /api/v1/reservations]
     L --> M{Token valido?}
     M -->|Nao| N[Retornar 401]
     N --> D

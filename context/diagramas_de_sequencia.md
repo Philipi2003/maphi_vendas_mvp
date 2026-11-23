@@ -149,6 +149,7 @@ sequenceDiagram
     participant API as MaphiApiClient
     participant Cloud as Cloud Function
     participant DB as Supabase
+    participant Firestore
     participant Pref as SharedPreferences
 
     Usuario->>View: escolhe entrar com Google
@@ -171,6 +172,7 @@ sequenceDiagram
         API->>Cloud: requisicao autenticada
         Cloud->>DB: upsert perfil por auth_uid
         DB-->>Cloud: role
+        Cloud->>Firestore: cria/atualiza users/{uid}.role
         Cloud-->>API: profile
         API-->>Auth: profile
         Auth->>Pref: persiste refreshToken/provider=google
@@ -288,6 +290,10 @@ sequenceDiagram
         end
     end
 ```
+
+Qualquer falha apos o inicio da transacao faz o banco reverter automaticamente
+as unidades alteradas e os registros criados. O clique duplicado deve ser bloqueado
+no cliente enquanto a requisicao estiver em andamento.
 
 A reserva usa uma unica transacao para selecionar unidades, grava-las como
 `RESERVADO`, criar a reserva e os `reservation_items`. A falha em qualquer etapa
@@ -568,7 +574,7 @@ sequenceDiagram
     API->>Cloud: lista unidades
     Cloud->>DB: require_owner + consulta unidades
     DB-->>Cloud: resultado
-    alt Existem unidades ou historico
+    alt Existem unidades vinculadas
         Cloud-->>API: 409 item_type_has_items
         API-->>Catalog: erro
         App-->>Dono: sabor nao pode ser excluido

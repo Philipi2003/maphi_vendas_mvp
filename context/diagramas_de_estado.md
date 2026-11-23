@@ -53,10 +53,10 @@ stateDiagram-v2
     ATIVA --> CANCELADA: cliente ou dono cancela
     ATIVA --> CONCLUIDA: dono conclui venda
 
-    CANCELADA --> APAGADA: dono exclui reserva cancelada
-    CONCLUIDA --> APAGADA: dono exclui reserva concluida
+    CANCELADA --> EXCLUIDA_LOGICAMENTE: dono exclui reserva cancelada
+    CONCLUIDA --> EXCLUIDA_LOGICAMENTE: dono exclui reserva concluida
 
-    APAGADA --> [*]
+    EXCLUIDA_LOGICAMENTE --> [*]
 
     ATIVA --> ATIVA: conflito de estoque impede alteracao
     ATIVA --> ATIVA: reserva nao pertence ao usuario cliente
@@ -70,6 +70,8 @@ registrando `cancelled_by` e `cancelled_at`.
 Ao concluir, todas as unidades precisam estar em `RESERVADO`; elas passam para
 `VENDIDO` e a reserva passa para `CONCLUIDA`, registrando `completed_at`.
 Uma reserva ativa nao pode ser apagada.
+A exclusao administrativa nao altera o status da reserva; ela define
+`deleted_at`. `EXCLUIDA_LOGICAMENTE` representa esse estado derivado.
 
 ## 4. Unidade fisica no estoque
 
@@ -83,6 +85,7 @@ stateDiagram-v2
 
     RESERVADO --> DISPONIVEL: cancelar reserva
     RESERVADO --> VENDIDO: concluir reserva
+    RESERVADO --> RESERVADO: alterar apenas expiration_at
 
     DISPONIVEL --> VENDIDO_PRESENCIAL: atualizacao administrativa manual
     DISPONIVEL --> EM_OFERTA_PRESENCIAL: atualizacao administrativa manual
@@ -104,8 +107,9 @@ stateDiagram-v2
     REMOVIDO --> REMOVIDO: atualizar expiration_at
 ```
 
-Unidades em `RESERVADO` nao podem ser alteradas manualmente pelo painel de
-estoque nem removidas individualmente. A transicao para `REMOVIDO` so ocorre
+Unidades em `RESERVADO` nao podem ter seu status alterado manualmente pelo
+painel de estoque nem serem removidas individualmente. A API ainda permite
+alterar somente `expiration_at` nessas unidades. A transicao para `REMOVIDO` so ocorre
 para unidades atualmente `DISPONIVEL`.
 
 Estados presentes no schema, mas nao usados automaticamente pelo fluxo de
