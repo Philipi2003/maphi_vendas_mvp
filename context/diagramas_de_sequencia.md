@@ -1,7 +1,5 @@
 # Diagramas de Sequencia do MaphiApp
-
 ## 1. Inicializacao da aplicacao
-
 ```mermaid
 sequenceDiagram
     actor Usuario
@@ -76,19 +74,7 @@ sequenceDiagram
     Spots->>App: atualiza opcoes
     App->>Flet: finaliza renderizacao
 ```
-
-Observacoes reais:
-
-- Cliente publico: o catalogo filtra sabores ativos e nao exclusivos por encomenda.
-- O frontend ja remove itens inativos do estado local ao perder o acesso de dono.
-- Locais publicos precisam estar ativos, nao excluidos e terminar mais de 15
-  minutos no futuro.
-- Em build Web, a URL relativa usa o roteamento do Firebase Hosting. Fora do
-  navegador, o cliente usa `https://maphivendas.web.app` por padrao ou
-  `MAPHI_API_URL`.
-
 ## 2. Login com e-mail e senha
-
 ```mermaid
 sequenceDiagram
     actor Usuario
@@ -135,9 +121,7 @@ sequenceDiagram
         App->>Spots: recarrega locais
     end
 ```
-
 ## 3. Login com Google
-
 ```mermaid
 sequenceDiagram
     actor Usuario
@@ -179,12 +163,7 @@ sequenceDiagram
         Auth->>Auth: ativa sessao local
     end
 ```
-
-O Google usa persistencia em memoria no bridge JavaScript. A sessao persistente
-da aplicacao usa o refresh token salvo pelo Flet no `SharedPreferences`.
-
 ## 4. Logout
-
 ```mermaid
 sequenceDiagram
     actor Usuario
@@ -207,9 +186,7 @@ sequenceDiagram
     App->>Catalog: recarrega catalogo publico
     App->>Spots: recarrega locais publicos
 ```
-
 ## 5. Carregamento do catalogo publico
-
 ```mermaid
 sequenceDiagram
     actor Usuario
@@ -236,9 +213,7 @@ sequenceDiagram
     App->>View: refresh()
     View-->>Usuario: cards, estoque e filtros
 ```
-
 ## 6. Criacao atomica de reserva
-
 ```mermaid
 sequenceDiagram
     actor Cliente
@@ -290,18 +265,7 @@ sequenceDiagram
         end
     end
 ```
-
-Qualquer falha apos o inicio da transacao faz o banco reverter automaticamente
-as unidades alteradas e os registros criados. O clique duplicado deve ser bloqueado
-no cliente enquanto a requisicao estiver em andamento.
-
-A reserva usa uma unica transacao para selecionar unidades, grava-las como
-`RESERVADO`, criar a reserva e os `reservation_items`. A falha em qualquer etapa
-faz o contexto da conexao reverter as alteracoes. A data de preco e os dados do
-local ficam preservados como snapshots.
-
 ## 7. Listagem de reservas
-
 ```mermaid
 sequenceDiagram
     actor Usuario
@@ -349,9 +313,7 @@ sequenceDiagram
     App->>View: set_reservations(reservas, role, locais)
     View-->>Usuario: reservas e acoes permitidas pelo role
 ```
-
 ## 8. Cancelamento de reserva
-
 ```mermaid
 sequenceDiagram
     actor Usuario
@@ -392,9 +354,7 @@ sequenceDiagram
         end
     end
 ```
-
 ## 9. Conclusao administrativa da venda
-
 ```mermaid
 sequenceDiagram
     actor Dono
@@ -430,9 +390,7 @@ sequenceDiagram
         end
     end
 ```
-
 ## 10. Criacao e remocao de estoque pelo dono
-
 ```mermaid
 sequenceDiagram
     actor Dono
@@ -468,9 +426,6 @@ sequenceDiagram
         App-->>Dono: producao registrada
     end
 ```
-
-Remocao atomica de unidades disponiveis:
-
 ```mermaid
 sequenceDiagram
     actor Dono
@@ -502,12 +457,7 @@ sequenceDiagram
         App-->>Dono: unidades removidas
     end
 ```
-
-O backend nao permite remover unidades reservadas por esta rota. Reservas
-reservadas precisam ser canceladas antes de as unidades ficarem disponiveis.
-
 ## 11. CRUD de sabores e upload de imagem
-
 ```mermaid
 sequenceDiagram
     actor Dono
@@ -553,9 +503,6 @@ sequenceDiagram
         end
     end
 ```
-
-Exclusao de sabor:
-
 ```mermaid
 sequenceDiagram
     actor Dono
@@ -591,12 +538,7 @@ sequenceDiagram
         end
     end
 ```
-
-Observacao: o backend faz uma segunda verificacao no DELETE consultando
-`public.items` por `item_type_id`, antes de remover o sabor.
-
 ## 12. CRUD de locais de retirada
-
 ```mermaid
 sequenceDiagram
     actor Dono
@@ -629,9 +571,6 @@ sequenceDiagram
     API-->>Spots: pickup_spot
     Spots-->>App: atualiza opcoes
 ```
-
-Exclusao logica e cancelamento de reservas ativas:
-
 ```mermaid
 sequenceDiagram
     actor Dono
@@ -664,12 +603,7 @@ sequenceDiagram
     API-->>Spots: sucesso
     App->>App: recarrega catalogo e locais
 ```
-
-A API tambem cancela reservas ativas ligadas ao local durante o DELETE. O fluxo
-do app executa o cancelamento antes e o backend reforca a regra novamente.
-
 ## 13. Exclusao administrativa de reserva
-
 ```mermaid
 sequenceDiagram
     actor Dono
@@ -696,9 +630,7 @@ sequenceDiagram
         App-->>Dono: reserva apagada da interface
     end
 ```
-
 ## 14. Dispatch da Cloud Function
-
 ```mermaid
 sequenceDiagram
     participant Host as Firebase Hosting
@@ -748,9 +680,7 @@ sequenceDiagram
         end
     end
 ```
-
 ## 15. Pipeline CI/CD
-
 ```mermaid
 sequenceDiagram
     participant Dev as Desenvolvedor
@@ -803,4 +733,3 @@ sequenceDiagram
         end
     end
 ```
-

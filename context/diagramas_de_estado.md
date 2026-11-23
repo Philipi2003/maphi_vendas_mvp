@@ -1,7 +1,5 @@
 # Diagramas de Estado do MaphiApp
-
 ## 1. Sessao de autenticacao
-
 ```mermaid
 stateDiagram-v2
     [*] --> Visitante
@@ -21,9 +19,7 @@ stateDiagram-v2
     Autenticado --> Visitante: sessao removida ou renovacao invalidada
     Autenticado --> Autenticado: restaurar ou atualizar token
 ```
-
 ## 2. Papel do usuario
-
 ```mermaid
 stateDiagram-v2
     [*] --> SemSessao
@@ -40,12 +36,7 @@ stateDiagram-v2
     Cliente --> SemSessao: logout
     Dono --> SemSessao: logout
 ```
-
-As rotas administrativas sao autorizadas pelo perfil armazenado no Supabase.
-O campo local do frontend nao substitui essa verificacao no backend.
-
 ## 3. Reserva
-
 ```mermaid
 stateDiagram-v2
     [*] --> ATIVA: criar reserva
@@ -62,19 +53,7 @@ stateDiagram-v2
     ATIVA --> ATIVA: reserva nao pertence ao usuario cliente
     ATIVA --> ATIVA: tentativa de cancelar reserva ja modificada
 ```
-
-Ao cancelar, todas as unidades reservadas precisam estar em `RESERVADO`.
-Somente entao elas voltam para `DISPONIVEL` e a reserva muda para `CANCELADA`,
-registrando `cancelled_by` e `cancelled_at`.
-
-Ao concluir, todas as unidades precisam estar em `RESERVADO`; elas passam para
-`VENDIDO` e a reserva passa para `CONCLUIDA`, registrando `completed_at`.
-Uma reserva ativa nao pode ser apagada.
-A exclusao administrativa nao altera o status da reserva; ela define
-`deleted_at`. `EXCLUIDA_LOGICAMENTE` representa esse estado derivado.
-
 ## 4. Unidade fisica no estoque
-
 ```mermaid
 stateDiagram-v2
     [*] --> DISPONIVEL: criar unidade no lote de producao
@@ -106,20 +85,7 @@ stateDiagram-v2
 
     REMOVIDO --> REMOVIDO: atualizar expiration_at
 ```
-
-Unidades em `RESERVADO` nao podem ter seu status alterado manualmente pelo
-painel de estoque nem serem removidas individualmente. A API ainda permite
-alterar somente `expiration_at` nessas unidades. A transicao para `REMOVIDO` so ocorre
-para unidades atualmente `DISPONIVEL`.
-
-Estados presentes no schema, mas nao usados automaticamente pelo fluxo de
-reserva atual:
-
-- `VENDIDO_PRESENCIAL`
-- `EM_OFERTA_PRESENCIAL`
-
 ## 5. Sabor do catalogo
-
 ```mermaid
 stateDiagram-v2
     [*] --> ATIVO: criar sabor ativo
@@ -139,12 +105,7 @@ stateDiagram-v2
 
     EXCLUIDO --> [*]
 ```
-
-O sabor possui ainda o atributo `is_custom_order_only`. O backend impede
-reservas desse sabor e a producao administrativa nao cria unidades para ele.
-
 ## 6. Local de retirada
-
 ```mermaid
 stateDiagram-v2
     [*] --> ATIVO: criar local
@@ -163,16 +124,7 @@ stateDiagram-v2
 
     EXCLUIDO --> [*]
 ```
-
-O estado persistido combina `is_active` e `deleted_at`. `EXCLUIDO` significa
-`deleted_at != null` e `is_active=false`.
-
-Antes da exclusao, reservas ativas relacionadas sao canceladas e suas unidades
-retornam para `DISPONIVEL`. Uma exclusao do local tambem realiza essa limpeza
-como salvaguarda no backend.
-
 ## 7. Formulario de autenticacao
-
 ```mermaid
 stateDiagram-v2
     [*] --> Login
@@ -191,9 +143,7 @@ stateDiagram-v2
 
     Encerrado --> Login: abrir autenticacao novamente
 ```
-
 ## 8. Operacao de criacao de reserva no cliente
-
 ```mermaid
 stateDiagram-v2
     [*] --> Inativa

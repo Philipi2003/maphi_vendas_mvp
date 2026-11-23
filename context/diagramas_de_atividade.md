@@ -1,7 +1,5 @@
 # Diagramas de Atividade do MaphiApp
-
 ## 1. Fluxo geral da aplicacao
-
 ```mermaid
 flowchart TD
     A([Inicio]) --> B[Inicializar aplicacao Flet]
@@ -40,9 +38,7 @@ flowchart TD
     U --> V
     V --> M
 ```
-
 ## 2. Inicializacao e restauracao da sessao
-
 ```mermaid
 flowchart TD
     A([Abrir aplicacao]) --> B[MaphiApplication cria controllers e views]
@@ -87,9 +83,7 @@ flowchart TD
     Y --> AA([Catalogo pronto])
     Z --> AA
 ```
-
 ## 3. Autenticacao
-
 ```mermaid
 flowchart TD
     A([Usuario abre login]) --> B{Modo escolhido}
@@ -134,9 +128,7 @@ flowchart TD
     N --> AB
     Q --> AB
 ```
-
 ## 4. Logout
-
 ```mermaid
 flowchart TD
     A([Usuario seleciona sair]) --> B{Provider utilizado foi Google?}
@@ -150,9 +142,7 @@ flowchart TD
     H --> I[Recarregar locais publicos]
     I --> J([Aplicacao volta ao modo visitante])
 ```
-
 ## 5. Navegacao e selecao no catalogo
-
 ```mermaid
 flowchart TD
     A([Catalogo exibido]) --> B[Aplicar filtro Todos, Disponiveis ou Esgotados]
@@ -175,9 +165,7 @@ flowchart TD
     E -->|Editar ou criar sabor| P[Fluxo administrativo de sabores]
     E -->|Editar ou excluir local| Q[Fluxo administrativo de locais]
 ```
-
 ## 6. Criacao de reserva
-
 ```mermaid
 flowchart TD
     A([Usuario seleciona Reservar]) --> B{Usuario autenticado?}
@@ -243,9 +231,7 @@ flowchart TD
     AN --> AO[Abrir tela de reservas]
     AO --> AP([Reserva criada])
 ```
-
 ## 7. Cancelamento, conclusao e exclusao logica de reservas
-
 ```mermaid
 flowchart TD
     A([Usuario escolhe acao da reserva]) --> B{Acao}
@@ -299,9 +285,7 @@ flowchart TD
     AC --> AH
     AG --> AH
 ```
-
 ## 8. Gerenciamento de estoque
-
 ```mermaid
 flowchart TD
     A([Dono abre painel de estoque]) --> B{Acao selecionada}
@@ -350,9 +334,7 @@ flowchart TD
     AD --> AF
     AE --> AF
 ```
-
 ## 9. Gerenciamento de sabores
-
 ```mermaid
 flowchart TD
     A([Dono seleciona sabor]) --> B{Acao}
@@ -416,9 +398,7 @@ flowchart TD
     AF --> AN
     AM --> AN
 ```
-
 ## 10. Gerenciamento de locais de retirada
-
 ```mermaid
 flowchart TD
     A([Dono seleciona local]) --> B{Acao}
@@ -464,9 +444,7 @@ flowchart TD
     S --> AD
     AC --> AD
 ```
-
 ## 11. Listagem de reservas
-
 ```mermaid
 flowchart TD
     A([Usuario abre Reservas]) --> B{Usuario autenticado?}
@@ -496,9 +474,7 @@ flowchart TD
     R --> T([Listagem atualizada])
     S --> T
 ```
-
 ## 12. Tratamento de uma requisicao da Cloud Function
-
 ```mermaid
 flowchart TD
     A([Requisicao chega no Hosting]) --> B{Origem permitida?}
@@ -548,9 +524,7 @@ flowchart TD
     AB --> AE
     AD --> AE
 ```
-
 ## 13. Pipeline de CI/CD
-
 ```mermaid
 flowchart TD
     A([Commit enviado]) --> B{Evento do GitHub}
